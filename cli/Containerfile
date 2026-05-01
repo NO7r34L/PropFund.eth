@@ -1,0 +1,38 @@
+# PropFund autonomous trader.
+#
+# Build:   podman build -t propfund-agent -f cli/Containerfile cli
+# Run:     podman run -d --name propfund-agent --restart=unless-stopped \
+#            -e PROPFUND_KEY=0x... \
+#            -e PROPFUND_NETWORK=basesepolia \
+#            -e AGENT_MODEL=<model-id-your-backend-serves> \
+#            -e LLM_BASE_URL=<your-OpenAI-compatible-endpoint> \
+#            -e OPENROUTER_API_KEY=...   # only if LLM_BASE_URL is OpenRouter
+#            -v /var/log/propfund:/var/log/propfund \
+#            propfund-agent
+# Logs:    podman logs -f propfund-agent          (stdout)
+#          tail -f /var/log/propfund/agent.log    (JSONL on host)
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files first for better layer caching
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev --no-audit --no-fund && npm cache clean --force
+
+# Copy the rest of the CLI source
+COPY src ./src
+COPY mcp ./mcp
+COPY scripts ./scripts
+COPY bin ./bin
+
+# JSONL log goes to the mounted volume so it survives container restarts
+ENV AGENT_LOG=/var/log/propfund/agent.log
+
+# Sensible defaults — override at run-time with -e
+ENV PROPFUND_NETWORK=basesepolia
+ENV AGENT_CADENCE_SEC=300
+ENV AGENT_MAX_ACTIONS=500
+
+# Make the log directory at start-up (works even if the volume is fresh)
+CMD ["sh", "-c", "mkdir -p /var/log/propfund && exec node scripts/agent.js"]
