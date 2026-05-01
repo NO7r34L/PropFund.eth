@@ -1,0 +1,15 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"        # required for transient storage (TSTORE/TLOAD)
+optimizer = true
+optimizer_runs = 1              # smallest deployed bytecode — needed after delegation refactor
+via_ir = false                 # disabled — 0.8.26 + via_ir mis-folds block.number across vm.roll
+bytecode_hash = "none"         # strip Solidity metadata for size + reproducibility
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false

@@ -1,0 +1,9 @@
+{
+    "filter_paths": "lib/|test/|script/",
+    "exclude_informational": false,
+    "exclude_optimization": false,
+    "exclude_low": false,
+    "exclude_medium": false,
+    "exclude_high": false,
+    "detectors_to_exclude": "naming-convention,timestamp,low-level-calls,calls-loop,costly-loop,cache-array-length"
+}

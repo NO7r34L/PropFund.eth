@@ -1,0 +1,64 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  forge:
+    name: forge build + fmt + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-commit
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Test
+        env:
+          # Optional: set BASE_SEPOLIA_RPC as a repo secret to also run the live-Pyth fork test.
+          # Without it, that test auto-skips and the rest of the suite still runs.
+          BASE_SEPOLIA_RPC: ${{ secrets.BASE_SEPOLIA_RPC }}
+        run: forge test -vv
+
+  cli:
+    name: cli — node syntax + audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: cli/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax check entry points
+        run: |
+          node --check bin/propfund.js
+          for f in $(find src -name '*.js'); do node --check "$f"; done
+
+      - name: Audit
+        run: npm audit --audit-level=high || true

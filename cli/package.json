@@ -1,0 +1,30 @@
+{
+  "name": "@propfund/cli",
+  "version": "0.1.0",
+  "description": "Command-line trader for PropFund — full eval/funding/trade/withdraw lifecycle, an MCP server, and a reference autonomous LLM-driven agent.",
+  "type": "module",
+  "bin": {
+    "propfund": "./bin/propfund.js",
+    "propfund-mcp": "./mcp/server.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "mcp",
+    "scripts"
+  ],
+  "scripts": {
+    "start": "node ./bin/propfund.js",
+    "mcp": "node ./mcp/server.js",
+    "agent": "node ./scripts/agent.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ethers": "^6.16.0",
+    "zod": "^3.23.8"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0-only"
+}

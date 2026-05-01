@@ -1,0 +1,28 @@
+# Foundry artifacts
+out/
+cache/
+broadcast/
+
+# Submodules / vendored libs (re-fetched via `forge install` and `git submodule update`)
+# Anchored to repo root so `src/lib/` (project-internal SafeTransferLib) is still tracked.
+/lib/
+
+# Node
+node_modules/
+package-lock.json.bak
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Build & coverage outputs
+coverage/
+lcov.info
+*.tsbuildinfo

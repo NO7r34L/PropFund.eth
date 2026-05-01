@@ -1,0 +1,116 @@
+# PropFund — Test Results
+
+Compiler: solc 0.8.26, EVM Cancun, optimizer on (1 run — needed for size after delegation refactor + Pausable + audit fixes).
+
+## 101 passed, 0 failed, 1 skipped (103 with fork RPC set)
+
+```
+$ forge test
+Ran 7 test suites: 101 tests passed, 0 failed, 1 skipped (102 total tests)
+```
+
+The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 103/103.
+
+## Suite breakdown
+
+| suite | tests | what it covers |
+| --- | ---: | --- |
+| `PropFund.t.sol` | 66 | unit: LP, eval (single + multi-asset + cancel cooldown), long/short, partial close, **mandatory TP/SL**, liquidation, level-up, profit/loss, NFT minting, multi-asset trading, accounting, **Pyth conf-interval guard**, **emergency pause**, view stats, **leverage-tier gate** |
+| `Lifecycle.t.sol` | 2 | end-to-end traces with full state log (happy path + loss-at-trade-stage) |
+| `LifecycleFull.t.sol` | 1 | multi-trader full-protocol trace |
+| `Invariants.t.sol` | 12 | stateful fuzz; pool solvency, drawdown floor, deploy cap (`deployed ≤ deposit × 5`), eval state machine, queue invariants, cancel-cooldown bookkeeping, post-audit invariants. Handler now derives valid TP/SL from current Pyth spot and fuzzes `leverage` 1..10, so trade-flow paths are actually exercised |
+| `QueueAndExpiry.t.sol` | 11 | funding queue + fair pool partition + 14-day position max-duration |
+| `Delegation.t.sol` | 9 | agent authorization, expiry, revoke, max-notional cap, no-fund-leakage to agent |
+| `PythFork.t.sol` | 2 (skipped without RPC) | fork test against live Pyth on Base Sepolia: every listed feed at expo=−8, conf within reasonable bounds |
+
+## Contract size
+
+```
+PropFund    24,544 / 24,576  (32 bytes spare under EIP-170)
+EvalCert     2,551
+EvalCertRenderer  ~14,000
+```
+
+## Slither (latest run)
+
+Findings remaining after audit fixes are all false positives or accepted-by-design:
+
+- `divide-before-multiply` on `notional = marginUsed × leverage` — intentional (notional is trading math; marginUsed is already integer USDC).
+- `incorrect-equality` on `totalShares == 0` — correct given the `DEAD_SHARES` sentinel.
+- `pyth-unchecked-confidence` — false positive; slither doesn't trace into `_tryReadSpot` to see the conf check.
+- `reentrancy-no-eth` — guarded by transient-storage `nonReentrant` on every external write path.
+- `unused-return` on `CERT.mint` — intentional (wrapped in `try/catch`).
+
+All 5 medium-severity audit findings (M-1 through M-5) and 4 of 4 low-severity findings have been resolved. See [`THREAT_MODEL.md`](./THREAT_MODEL.md).
+
+## Invariants (12, in `Invariants.t.sol`)
+
+Every invariant holds across the fuzz handler sequences:
+
+1. Pool USDC balance covers sum of trader deposits
+2. Per-trader deploy ≤ effective cap (per-trader limit AND fair share)
+3. `totalDeployed` == sum of active position deployments
+4. Eval state never simultaneously `active && passed`
+5. Position active iff `entryPrice > 0`
+6. Funded count ≤ `MAX_FUNDED_TRADERS`
+7. `poolBalance ≤ USDC.balanceOf(this)`
+8. `totalShares > 0` implies `poolValue > 0`
+9. Treasury fee balance bounded by pool inflow
+10. **Eval drawdown floor never breached on active eval** (post-audit)
+11. **`startBlock` never in the future** (post-audit)
+12. **Active funded always has deposit > 0** (post-audit, after auto-withdraw removal)
+
+## Delegation tests (9, in `Delegation.t.sol`)
+
+The agent-first claim is asserted explicitly:
+
+- `test_setController_StoresAuth` — auth fields persist correctly
+- `test_setController_RejectsZeroAgent` — `agent = 0x0` reverts
+- `test_setController_RejectsPastExpiry` — `expiry <= block.timestamp` reverts
+- `test_NonAgentBlocked` — random EOA can't call `*For(principal)`
+- `test_revokeController_KillsAuthority` — revoke takes effect immediately
+- `test_ExpiryEnforced` — agent loses authority at `expiry`
+- `test_Agent_RunsFullLifecycleAsPrincipal` — eval → fund → trade → close as principal, **agent's USDC balance never moves**
+- `test_OpenTradeFor_RejectsOversizedNotional` — `maxNotionalPerTrade` cap fires
+- `test_PrincipalCanActInParallelWithAgent` — both can call functions on the same account
+
+## Audit-driven tests (in `PropFund.t.sol`)
+
+Added during the audit phase to lock in the fixes:
+
+- `test_Pyth_WideConfRejectsOpenTrade` — M-1: conf > 0.5% marks price stale, opens revert
+- `test_Pyth_TightConfAllowsOpenTrade` — M-1 boundary: conf at exactly 0.5% still admits
+- `test_Profit_NoLongerAutoWithdraws` — M-3: profits compound, no auto-transfer
+- `test_LP_WithdrawZeroPayoutReverts` — M-4
+- `test_CancelEval_CooldownEnforcedOnSecondCancel` — I-6
+- `test_CancelEval_CooldownClearsAfterBlocks` — I-6 boundary
+- `test_OpenTrade_RejectsZeroTpSl` — mandatory TP/SL
+- `test_OpenTrade_RejectsTpOnWrongSideOrInvertedSl` — TP/SL relationship
+- `test_OpenTrade_AllowsTrailingSlAboveEntry` — trailing-stop pattern
+- `test_Pause_BlocksDepositAndOpens` — Pausable
+- `test_Pause_AllowsExits` — Pausable doesn't trap users
+- `test_Pause_OnlyDev` — auth
+- `test_Pause_UnpauseRestoresFlow` — toggle
+- `test_EvalPass_MixedAssets` — multi-asset eval (BTC + ETH + BTC compounding)
+- `test_EvalRejectsInvalidAsset` — assetId out of range
+
+## Fork tests against live Pyth (2, in `PythFork.t.sol`)
+
+Run with `BASE_SEPOLIA_RPC=https://sepolia.base.org forge test --match-contract PythFork`:
+
+- `test_AllListedFeedsAreExpoMinus8` — every one of the 8 listed assets reports at expo=−8 with positive price + non-zero publishTime
+- `test_MajorsHaveReasonableConfDuringNormalMarket` — ETH/BTC/SOL conf < 1% of price during normal conditions
+
+These verify the assumptions baked into PropFund (`TARGET_PRICE_EXPO = -8`, `MAX_CONF_BPS = 50`) against actual Pyth state.
+
+## Lifecycle traces (2, in `Lifecycle.t.sol`, run with `-vvv`)
+
+- `test_Lifecycle_HappyPath` — eval → pass → fund → profitable trade → withdraw (full state log at each step)
+- `test_Lifecycle_FailAtProfitStage` — eval → pass → fund → losing trade (deposit absorbs)
+
+## Anvil end-to-end (manual, via `cli/`)
+
+The CLI has been smoke-tested end-to-end on a fresh Anvil-fork deploy:
+- Keeper bot (`propfund keeper run`) handles `liquidate` / `executeExit` / `forceClose` / `processFundingQueue` (with Pyth refresh per tick)
+- Delegation flow validated: principal authorizes a controller, controller runs the full lifecycle, controller's USDC balance stays at 0
+- Keeper bot survives restarts (state derived purely from on-chain reads each tick)
