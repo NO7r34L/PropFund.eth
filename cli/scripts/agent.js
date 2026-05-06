@@ -41,19 +41,36 @@ const MAX_ACTIONS = Number(process.env.AGENT_MAX_ACTIONS || 100);
 const MAX_EVAL_CANCELS = 3;
 const MIN_WRITE_GAP_SEC = 60;
 
-const SYSTEM_PROMPT = `You are an AI prop trader operating an autonomous PropFund account on Ethereum (Sepolia testnet).
+const SYSTEM_PROMPT = `You are an autonomous trader operating a PropFund account on Base.
 
 PROTOCOL RULES (cannot be changed):
-- EVAL phase: pay $10 fee, then open VIRTUAL long-only trades and close them. Each trade you pick which asset (ETH/BTC/SOL/AVAX/LINK/AAVE/DOGE/ARB) — rotate to whichever has the cleanest long setup. Must achieve cumulative +8% return across at least 3 trades to PASS, with no peak-to-trough drawdown >5% along the way. Each trade requires holding for at least 10 blocks (≈2 minutes on Base) before close. PnL compounds across all assets — virtual balance is shared.
+- EVAL phase: pay $10 fee, then open VIRTUAL long-only trades and close them. At each open you pick which asset (ETH/BTC/SOL/AVAX/LINK/AAVE/DOGE/ARB) — asset selection happens at entry time, not as a reason to close existing trades. To PASS you need: virtualBalance ≥ 1.08 (i.e. +8% cumulative compounded return) AND tradeCount ≥ 3, both at the moment of close. tradeCount has no upper limit — you can open and close as many trades as you want inside the eval window (only the cumulative return matters). Drawdown from peak virtualBalance must stay ≤ 5% the entire time; breach = instant fail. Each trade requires holding at least 10 blocks (≈20s on Base) before close. Eval window is ~30 days.
+- HOW EVAL MATH ACTUALLY WORKS (read carefully — the most common failure mode is misunderstanding this):
+    * Virtual trades have NO capital cost. There is no "freeing capital" — there is no capital tied up.
+    * On every close, virtualBalance *= (close_price / entry_price). It STARTS at 1.0; you need it to reach 1.08 (or higher) to pass.
+    * Closing a trade that hasn't moved (return = 0.00%) just multiplies by ~1.0 and BURNS A SLOT in your tradeCount without making progress.
+    * Three closes at +3% each = ~+9.27% (compounds) → PASS. One hundred closes at 0.00% = still 1.0000 → still failing.
+    * Therefore: opening a trade and closing it before the price has actually moved is strictly worse than waiting. NEVER close a virtual trade just to "rotate" or "free capital." Hold until you have a real return.
 - After PASSING eval: pay $100 deposit and claim_funding. You become a funded trader.
-- FUNDED: you can open real long/short positions on any listed Chainlink-feeded asset. Per-trade margin is capped at deposit/2. Leverage 1-10×. PnL is computed on (margin × leverage). Loss on a single trade is capped at the position margin (the other 50% of your deposit always survives).
-- Profit split on real trades: 80% compounds into your deposit, 15% goes to LPs, 5% to dev.
+- FUNDED: you can open real long/short positions on any listed Pyth-feeded asset. Per-trade margin is capped at deposit/2. Leverage 1-10×, level-gated (3× unlocks at +$50 cumPnl, 5× at +$150, 8× at +$400, 10× at +$1000). PnL is computed on (margin × leverage). Loss on a single trade is capped at the position margin (the other 50% of your deposit always survives).
+- Profit split on real trades: 80% compounds into your deposit, 15% goes to LPs, 5% to the protocol treasury.
 
 YOUR JOB:
-- Pass eval as efficiently as possible (real ETH price moves slowly on Sepolia; be patient — cancelling and restarting wastes $10 each time)
-- Once funded, trade profitably with risk-managed positions
-- Don't burn through ETH gas or USDC by oscillating
-- WAIT is always a valid action — if no good move is available, wait
+- Pass eval, then trade the funded account profitably. How you do that — entry timing,
+  hold duration, asset selection, exit triggers — is up to you. Read the candles, the
+  multi-timeframe signals, your own action history, and decide.
+- WAIT is always a valid action. There's no penalty for waiting; there is a real cost
+  ($10 each cancel, drawdown counts on losses) for low-quality entries.
+
+You are evaluated on results (passing eval, growing the funded deposit), not on activity.
+
+FIELD DISAMBIGUATION (the state JSON has several similar-looking fields — read them carefully):
+- eval.open_trade.unrealized_return — YOUR open trade's PnL since you opened it. This is
+  what closes will realize against virtualBalance.
+- eval.cumulative_return — your virtualBalance progress so far this eval (0.00% = 1.0).
+- multi_signals.per_asset[X].momentum_6h / momentum_1h — the ASSET's general market move
+  over a window, independent of any trade. A "+1.62% 6h momentum" reading does NOT mean
+  your open trade is up 1.62%. Look at unrealized_return for that.
 
 DECISION FORMAT:
 You MUST respond with a single JSON object and nothing else. The shape:
@@ -366,39 +383,15 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     const open = state.eval?.open_trade;
     const unreal = open?.unrealized_return_value ?? 0;
 
-    if (state.eval.active && state.eval.in_virtual_trade && open?.current_trade_can_close) {
-        // Trend-following exit logic: cut losers fast, let winners ride while trend holds.
-        // The previous "close at +0.3%" rule produced 22 trades at 0% — too quick to close winners.
-        const evalAssetSig = multiSignals?.per_asset?.[state.eval.asset_name] || signals;
-        const trendStillUp = evalAssetSig?.trend_short_vs_long === 'UP' && parseFloat(evalAssetSig?.momentum_1h || '0') > -0.1;
-
-        if (unreal <= -0.5) {
-            hints.push(`OPEN TRADE IS DOWN ${open.unrealized_return} — CUT THE LOSER. Hold is satisfied. CLOSE_EVAL_TRADE now to stop drawdown growth before it compounds. Don't hope for a bounce.`);
-        } else if (unreal <= -0.2) {
-            hints.push(`Open trade is ${open.unrealized_return}. Small loss. If trend has turned (trend_15m=${evalAssetSig?.trend_short_vs_long || '?'}, 1h momentum ${evalAssetSig?.momentum_1h || '?'}), close. If still aligned with original entry, hold one more cycle.`);
-        } else if (unreal >= 1.0) {
-            hints.push(`OPEN TRADE IS UP ${open.unrealized_return} — STRONG WIN. Even if signals still favour the trade, CLOSE_EVAL_TRADE to lock in. 1%+ moves in 15-min windows usually retrace. Banking 1% × 8 trades = +8% pass.`);
-        } else if (unreal >= 0.4 && !trendStillUp) {
-            hints.push(`Open trade is ${open.unrealized_return} and trend has weakened (trend_15m=${evalAssetSig?.trend_short_vs_long || '?'}). LET WINNER RUN UNTIL TREND BREAKS — but it's broken. CLOSE_EVAL_TRADE to lock the gain.`);
-        } else if (unreal >= 0.3 && trendStillUp) {
-            hints.push(`Open trade is ${open.unrealized_return} and trend still favourable (15m=${evalAssetSig?.trend_short_vs_long}, 1h momentum ${evalAssetSig?.momentum_1h}). HOLD — don't close winners early. Re-evaluate next cycle.`);
-        } else {
-            hints.push(`Hold satisfied (${open.current_trade_blocks_elapsed} blocks). Open trade is ${open.unrealized_return}. Trend ${evalAssetSig?.trend_short_vs_long}, 1h momentum ${evalAssetSig?.momentum_1h}. If trend reversed against your position, close. Otherwise hold.`);
-        }
-    }
+    // Hard state-machine hints only. Anything strategy-flavoured (when to enter, when to
+    // exit, threshold values, trend reading) belongs to the model — those are the things
+    // we want the agent to figure out itself. We only report mechanical state and which
+    // actions the contract will reject.
     if (state.eval.active && state.eval.in_virtual_trade && open && !open.current_trade_can_close) {
-        hints.push(`Open trade is ${open.unrealized_return} but hold not satisfied yet (${open.current_trade_blocks_elapsed}/10 blocks). CLOSE_EVAL_TRADE will revert with TradeTooShort. Wait this cycle.`);
+        hints.push(`Open trade is ${open.unrealized_return}, hold not satisfied yet (${open.current_trade_blocks_elapsed}/10 blocks). CLOSE_EVAL_TRADE will revert with TradeTooShort.`);
     }
     if (state.eval.active && !state.eval.in_virtual_trade) {
-        hints.push(`NO open virtual trade. CLOSE_EVAL_TRADE will revert with EvalNoPosition.`);
-        // With per-trade asset selection, ALL-ASSET SIGNALS is the right place to look — pick
-        // whichever asset has the cleanest UP setup right now. Don't default to ETH.
-        if (multiSignals?.best_long_setup) {
-            const b = multiSignals.best_long_setup;
-            hints.push(`Strongest LONG setup right now: ${b.asset} (1h momentum ${b.momentum_1h}, vol ${b.volatility}). Use {"action":"OPEN_EVAL_TRADE","args":{"asset":"${b.asset}"}}. Eval is long-only — pick the asset with positive momentum and trend=UP, regardless of which asset you traded last cycle.`);
-        } else {
-            hints.push(`No asset shows a clean LONG setup (all 8 are flat or downtrending). Eval is long-only. Prefer WAIT until at least one asset has trend=UP and 1h momentum > +0.5%. Don't open into a downtrend just to "make progress" — losses count toward drawdown.`);
-        }
+        hints.push(`No open virtual trade — CLOSE_EVAL_TRADE will revert with EvalNoPosition.`);
     }
     if (state.eval.active && !state.eval.passed) {
         hints.push(`EVAL NOT PASSED yet (cumulative_return=${state.eval.cumulative_return}, target=${state.eval.target_return}, gap=${state.eval.return_gap_to_pass}). CLAIM_FUNDING WILL REVERT until passed=true. Do not attempt it.`);
@@ -406,43 +399,8 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     if (state.eval.passed) {
         hints.push(`EVAL PASSED. Next step is CLAIM_FUNDING.`);
     }
-    // Pre-eval: agent just needs to decide whether to pay the $10 to start. With per-trade
-    // asset selection, eval is much more flexible — any of 8 assets might pump in the next 7 days.
-    const preEvalNow = !state.eval?.active && !state.funded?.active;
-    if (preEvalNow) {
-        if (multiSignals?.best_long_setup) {
-            hints.push(`PRE-EVAL: at least one asset has a clean LONG setup right now (${multiSignals.best_long_setup.asset}, 1h ${multiSignals.best_long_setup.momentum_1h}). Reasonable to START_EVAL — you'll have 7 days to land 3 winning trades across any of the 8 assets.`);
-        } else {
-            hints.push(`PRE-EVAL: no asset has a clean LONG setup right now. Starting eval is fine if you're willing to wait for a setup, but you'll burn block-time. WAIT is also valid — keep monitoring.`);
-        }
-    }
-
-    if (state.funded.active && !state.position) {
-        if (multiSignals?.best_long_setup) {
-            const b = multiSignals.best_long_setup;
-            hints.push(`FUNDED, no open position. Strongest LONG setup right now: ${b.asset} (1h momentum ${b.momentum_1h}, vol ${b.volatility}, score ${b.score}). Consider OPEN_TRADE side=long on this asset, not ETH by default. Pick the cleanest edge across the 8 listed assets.`);
-        } else if (multiSignals?.best_short_setup) {
-            const b = multiSignals.best_short_setup;
-            hints.push(`FUNDED, no open position. No clean long setup, but ${b.asset} shows a SHORT setup (1h momentum ${b.momentum_1h}, vol ${b.volatility}, score ${b.score}). Consider OPEN_TRADE side=short on this asset.`);
-        } else {
-            hints.push(`FUNDED, no open position. No asset shows a clean setup right now (all are choppy or low-conviction). WAIT is the right call.`);
-        }
-    }
-    if (state.funded.active && state.position && multiSignals?.per_asset) {
-        // When already in a position, surface whether the current asset's signals still favour the side.
-        const symFromId = state.assets.find(a => a.id === state.position.asset_id)?.name;
-        const sig = symFromId && multiSignals.per_asset[symFromId];
-        if (sig) {
-            const m1 = parseFloat(sig.momentum_1h);
-            const trendOk = state.position.side === 'long'
-                ? sig.trend_short_vs_long !== 'DOWN' && m1 > -0.3
-                : sig.trend_short_vs_long !== 'UP' && m1 < 0.3;
-            if (!trendOk) {
-                hints.push(`Open ${state.position.side} on ${symFromId}: trend has turned against you (trend=${sig.trend_short_vs_long}, 1h momentum=${sig.momentum_1h}). Consider CLOSE_TRADE or tighten SL.`);
-            }
-        }
-    }
-
+    // No pre-eval / funded "you should trade X" hints. The model has access to all
+    // per-asset signals and candle data; picking what (and whether) to trade is its job.
     // Show all-asset signals when the agent has a real choice. Hide them only when locked into
     // an open virtual trade (asset is already picked, focus on the close decision).
     const showMultiAsset = !(state.eval?.active && state.eval?.in_virtual_trade);
@@ -484,12 +442,23 @@ async function askLLM(messages) {
         model: MODEL,
         messages,
         temperature: 0.3,
-        // Mercury-2 and similar reasoning models burn a lot of hidden tokens. 2500 covers
-        // even chunky reasoning cycles; visible JSON is always tiny.
-        max_tokens: 2500,
+        // Decisions are typically <300 output tokens (one JSON object). 800 leaves headroom
+        // for verbose reasoning models without burning budget on runaway completions.
+        max_tokens: 800,
     };
-    // Local Ollama honours response_format and is much more reliable when forced into JSON mode.
-    if (!IS_OPENROUTER) body.response_format = { type: 'json_object' };
+    // Anthropic prompt caching via OpenRouter (auto-mode). OpenRouter forwards this to
+    // Anthropic only and applies the cache breakpoint to the largest stable prefix it
+    // finds. NOTE: each Anthropic model has a minimum cacheable-prefix size — Haiku 3.5 +
+    // older Haiku tiers require ≥2048 tokens; Sonnet/Opus require ≥1024. If the cacheable
+    // prefix is below that floor the directive is silently dropped (no error, no cache hit).
+    // Today our system prompt is ~1400 tokens, so on claude-haiku-4.5 this is a no-op until
+    // the prompt grows or we move to a model with a smaller floor. Keeping the field in
+    // place so it kicks in automatically when one of those happens.
+    if (IS_OPENROUTER) body.cache_control = { type: 'ephemeral' };
+    // Force structured-JSON mode on every backend that supports it. OpenRouter passes this
+    // through to upstream providers (Anthropic, OpenAI, etc.); local Ollama also honours it.
+    // Eliminates a class of "model wrapped JSON in prose" parse failures.
+    body.response_format = { type: 'json_object' };
 
     const res = await fetch(`${LLM_BASE_URL}/chat/completions`, {
         method: 'POST',

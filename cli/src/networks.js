@@ -5,12 +5,14 @@ export const NETWORKS = {
     basesepolia: {
         // PropFund on Base Sepolia. Fill `contractAddr` and `usdcAddr` after running
         // script/DeployBaseSepolia.s.sol — see README "Deploy" section.
+        // Asset / Pyth-feed order matches the deploy script (and `base` mainnet entry below)
+        // — must mirror the on-chain priceIds[i] order or asset names will mis-resolve.
         contractAddr: '',
         usdcAddr: '',
         chainId: 84532,
         chainName: 'Base Sepolia',
         rpcUrl: 'https://sepolia.base.org',
-        assetNames: ['ETH', 'BTC', 'LINK', 'SOL', 'AVAX', 'AAVE', 'DOGE', 'ARB'],
+        assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
         usdcMintable: true,
@@ -18,9 +20,9 @@ export const NETWORKS = {
         pythPriceIds: [
             '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',  // ETH/USD
             '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',  // BTC/USD
-            '0x8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221',  // LINK/USD
             '0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',  // SOL/USD
             '0x93da3352f9f1d105fdfe4971cfa80e9dd777bfc5d0f683ebb6e1294b92137bb7',  // AVAX/USD
+            '0x8ac0c70fff57e9aefdf5edf44b51d62c2d433653cbb2cf5cc06bb115af04d221',  // LINK/USD
             '0x2b9ab1e972a281585084148ba1389800799bd4be63b957507db1349314e47445',  // AAVE/USD
             '0xdcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c',  // DOGE/USD
             '0x3fa4252848f9f0a1480be62745a4629d9eb1322aebab8a791e344b3b9c1adcf5',  // ARB/USD
