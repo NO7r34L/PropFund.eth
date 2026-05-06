@@ -22,6 +22,9 @@ package-lock.json.bak
 *.swp
 .DS_Store
 
+# Local tool/editor state
+.claude/
+
 # Build & coverage outputs
 coverage/
 lcov.info

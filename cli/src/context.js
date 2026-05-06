@@ -20,7 +20,17 @@ const ERC20_ABI = [
 export function buildContext({ requireSigner = false, network } = {}) {
     const net = resolveNetwork(network);
     if (!net.contractAddr) {
-        throw new Error(`network "${net.key}" has no deployed contract address yet`);
+        throw new Error(
+            `network "${net.key}" has no contract address configured.\n` +
+            `Three ways to fix this:\n` +
+            `  1. Use a public deployment: edit cli/src/networks.js and set ` +
+            `${net.key}.contractAddr / .usdcAddr to the official address.\n` +
+            `  2. Deploy your own and paste the address into cli/src/networks.js. ` +
+            `See script/Deploy${net.key === 'base' ? 'Base' : 'BaseSepolia'}.s.sol.\n` +
+            `  3. Run a local fork: anvil + forge script script/DeployLocal.s.sol, ` +
+            `then export PROPFUND_NETWORK=local PROPFUND_CONTRACT=0x... PROPFUND_USDC=0x... ` +
+            `PROPFUND_RPC=http://localhost:8545.`
+        );
     }
 
     const rpcUrl = process.env.PROPFUND_RPC || net.rpcUrl;
