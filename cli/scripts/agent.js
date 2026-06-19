@@ -298,7 +298,7 @@ async function fetchAllCandles(symbols, tf = '15m', limit = 24) {
 
 // Min score for a setup to count as actionable. Below this, agent should WAIT — random
 // entries on weak signals are the #1 reason qwen3 ground out 22 trades at 0% net.
-const MIN_EDGE_SCORE = 0.50;
+const MIN_EDGE_SCORE = Number(process.env.EVAL_MIN_EDGE_SCORE || 0.50);
 
 // Build per-asset signals + a cross-asset ranking. Each asset has its own trend/momentum/range
 // for both 15m and 1h timeframes. The 1h is the higher-timeframe context — entries get a
@@ -896,6 +896,24 @@ async function tick(ctx) {
         return;
     }
     log('LLM', 'decision', { action: llmResult.parsed.action, reasoning: llmResult.parsed.reasoning, usage: llmResult.usage });
+
+    // Deterministic asset selection for eval entries: the LLM decides WHETHER to enter; the
+    // runtime enforces WHICH asset (the top-ranked momentum setup) and vetoes the entry when
+    // there's no clean setup. Stops the agent from defaulting to ETH or forcing a weak entry —
+    // the #1 way it grinds the eval window to net-flat.
+    if (llmResult.parsed.action === 'OPEN_EVAL_TRADE') {
+        const best = multiSignals?.best_long_setup;
+        if (!best) {
+            log('EXEC', 'entry-vetoed', { reason: `no best_long_setup >= ${MIN_EDGE_SCORE} edge — forcing WAIT` });
+            pushHistory('WAIT', null, { ok: true, action: 'WAIT' }, 'entry vetoed: no clean long setup (runtime)');
+            return;
+        }
+        const forced = best.asset;
+        if (llmResult.parsed.args?.asset !== forced) {
+            log('EXEC', 'entry-asset-override', { llmPicked: llmResult.parsed.args?.asset ?? null, forced, score: best.score });
+        }
+        llmResult.parsed.args = { ...(llmResult.parsed.args || {}), asset: forced };
+    }
 
     const result = await executeAction(llmResult.parsed, propfund, usdc, wallet, state, ctx.net);
     log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'action-ok' : 'action-failed', result);
