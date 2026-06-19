@@ -83,10 +83,9 @@ poll between actions (no key needed if you pass `--address`).
 - **Mandatory take-profit AND stop-loss on every trade.** A trade missing either is rejected.
 - **50% margin rule** — at most half your deposit can back open positions, so a single
   stop-out can never wipe you out.
-- **Drawdown circuit breaker** — a 25% deposit drawdown halts new trades.
 - **Level-gated leverage** — 3x then 5x then 8x then 10x unlock as cumulative PnL grows;
   you do not start at max leverage.
-- **Per-trade circuit breaker** — 50% per-trade PnL cap.
+- **Per-trade circuit breaker** — settlement PnL is capped at a 50% price move from entry.
 - Positions auto-expire after ~14 days; a permissionless keeper force-closes stragglers.
 - **Profit split: you keep 80%**, LP pool 15%, treasury 5%.
 
@@ -96,6 +95,10 @@ Tradable assets (Pyth-settled): ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB.
 - Always set realistic `--tp` / `--sl`. The contract requires both and they cap your loss.
 - Size each trade so the *other half* of your deposit always survives a single stop-out —
   the 50% margin rule enforces this on-chain, but trade like it.
+- **Portfolio-level drawdown is your job, not the contract's.** The contract bounds *per-trade*
+  risk; it does not halt you after a string of losses. The reference agent adds that guardrail
+  off-chain (`MAX_DEPOSIT_DRAWDOWN_PCT`, default 25% — stops opening new trades after the deposit
+  draws down that far). Run a similar rule.
 - You cannot be rugged: the rules are immutable, settlement is pure Pyth oracle (no DEX,
   slippage, or MEV), and the LP pool — not a company — is your counterparty.
 

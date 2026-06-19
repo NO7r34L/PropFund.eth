@@ -6,6 +6,62 @@ On-chain prop trading fund. Oracle-settled multi-asset perps. The LP pool is the
 counterparty. No DEX dependency, no off-chain matching, no central admin (the treasury
 wallet has emergency-pause + add-feeds + treasury-withdraw only — no rule changes).
 
+## Design boundaries (read this first)
+
+The choices below are deliberate. The most important ones are about what the contract
+**does not** promise — state them out loud so they aren't mistaken for omissions.
+
+**The load-bearing invariant: the pool can always pay.** Solvency is structural, not
+monitored. Every obligation is funded before it can exist:
+
+- **Escrow-first** — opening a trade moves the *entire notional* out of `poolBalance` into
+  `totalDeployed` up front (`src/PropFund.sol:1016-1018`). Nothing settles on credit.
+- **Profit capped at deployed** — a win can never pay more than the capital escrowed for it
+  (`if (profit > deployedPortion) profit = deployedPortion`, `src/PropFund.sol:1150`).
+- **Loss capped at margin** — a loss costs the trader at most the position margin; the other
+  ≥50% of deposit always survives (`_handleLoss`, `src/PropFund.sol:1207-1216`).
+- **Per-trade circuit breaker** — settlement PnL uses a price move capped at ±50% from entry
+  (`CIRCUIT_BREAKER_BPS`, `src/PropFund.sol:1396-1401`).
+- **LP withdrawals can't overdraw** — `payout > poolBalance` reverts (`src/PropFund.sol:616`).
+
+You don't have to trust an operator or a bot to keep this solvent — solvency falls out of the
+accounting.
+
+**Out of scope by design: LP profitability.** The pool is the counterparty, so whether LPs net
+positive is a function of aggregate trader edge vs. the eval-fee + 80/15/5 economics — an
+*economic tuning question, intentionally outside the contract.* The contract guarantees *"always
+able to settle,"* not *"LPs make money."* Those are different guarantees; conflating them is the
+usual design error. The eval fee and split are the knobs that tune LP economics **around** the
+contract, not inside it.
+
+**The eval is a liveness gate, not a skill oracle.** On-chain eval is intentionally simple: 1×
+**long-only**, +8% over ≥3 closes, ≤5% drawdown, ~30-day window (`EVAL_PROFIT_BPS = 800`,
+`MIN_EVAL_TRADES = 3`, `EVAL_DRAWDOWN_BPS = 500`). In a rising market it is trivially passable —
+**by design.** A contract can't oracle "skill," so it doesn't pretend to; the eval gates liveness
+and basic risk discipline (can an agent run the full lifecycle and respect a drawdown budget).
+Enforcement is split by what each layer *can* guarantee:
+
+- **On-chain = risk bounds** (must be trustless): mandatory TP *and* SL (`_validateExit`,
+  `src/PropFund.sol:1014`), 50% margin rule (`:1005`), fair-partition notional cap (`:1011`),
+  level-gated leverage (`:999`), per-trade circuit breaker.
+- **Agent layer = strategy** (off-chain by nature): edge-gated entries, deterministic
+  take-profit / trailing / drawdown-safe-stop exits, and a deposit-drawdown halt
+  (`MAX_DEPOSIT_DRAWDOWN_PCT`, default 25%) — see `cli/scripts/agent.js`.
+
+The protocol enforces *risk*; the agent enforces *strategy*. Skill lives off-chain because skill
+is not a property a contract can verify.
+
+| Concern | Enforced by | Guaranteed? |
+| --- | --- | --- |
+| Pool can always pay every obligation | Contract (escrow-first accounting) | **Yes, structurally** |
+| Per-trade risk bounded (margin / leverage / breaker) | Contract | **Yes** |
+| No admin can move funds or change rules | Contract (immutable, minimal treasury) | **Yes** |
+| LP pool is profitable | Nobody — economic tuning | No, by design |
+| Trader is "skilled" | Agent layer (off-chain) | No — eval is a liveness gate |
+
+If you remember one thing: **the contract guarantees solvency and risk bounds, not profitability
+or skill — and that line is drawn deliberately, not by omission.**
+
 ## Lifecycle
 
 ```
