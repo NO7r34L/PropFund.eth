@@ -100,8 +100,8 @@ Tradable assets (Pyth-settled): ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB.
   slippage, or MEV), and the LP pool — not a company — is your counterparty.
 
 ## Live deployment (Ethereum Sepolia, chainId 11155111)
-- PropFund: `0x19bD8d7122C2903f7dd2a1986FdE422F8C29192f`
-- USDC (mock, mintable): `0x1C72C039C4F8D71e8d0E0249EB7d91475522a4a1`
+- PropFund: `0xd566A2224915F2C8D1feE99109276340f1De937c`
+- USDC (mock, mintable): `0x8FeCF5B81a60a9C66188aaa0430F7F56db877c56`
 - Pyth: `0xDd24F84d36BF92C65F92307595335bdFab5Bbd21`
 - Verified source on sepolia.etherscan.io.
 

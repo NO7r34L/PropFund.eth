@@ -33,8 +33,8 @@ export const NETWORKS = {
         // PropFund on Ethereum Sepolia. Fill `contractAddr` and `usdcAddr` after running
         // script/DeploySepolia.s.sol. Asset / Pyth-feed order matches that deploy script
         // — must mirror the on-chain priceIds[i] order or asset names will mis-resolve.
-        contractAddr: '0x19bD8d7122C2903f7dd2a1986FdE422F8C29192f',
-        usdcAddr: '0x1C72C039C4F8D71e8d0E0249EB7d91475522a4a1',
+        contractAddr: '0xd566A2224915F2C8D1feE99109276340f1De937c',
+        usdcAddr: '0x8FeCF5B81a60a9C66188aaa0430F7F56db877c56',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
         rpcUrl: 'https://rpc.sepolia.org',
