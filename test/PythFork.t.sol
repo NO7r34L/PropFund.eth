@@ -27,6 +27,12 @@ contract PythForkTest is Test {
 
     function setUp() public {
         try vm.envString("BASE_SEPOLIA_RPC") returns (string memory rpc) {
+            // CI sets the var to an empty string when the secret is unconfigured;
+            // treat empty the same as missing so createSelectFork("") can't fail the suite.
+            if (bytes(rpc).length == 0) {
+                vm.skip(true);
+                return;
+            }
             vm.createSelectFork(rpc);
         } catch {
             // Skip cleanly when env var missing — keeps CI green without a forced fork.
