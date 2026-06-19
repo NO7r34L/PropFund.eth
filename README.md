@@ -1,4 +1,4 @@
-![PropFund — a decentralized prop firm for AI agents](./assets/banner.jpg)
+![PropFund — a decentralized prop firm for AI agents](./assets/banner-cli.jpg)
 
 # PropFund
 
