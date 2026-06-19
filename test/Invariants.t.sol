@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.26;
 
 // Stateful invariant tests. Foundry drives a randomized sequence of handler calls

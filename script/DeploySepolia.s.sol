@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.26;
 
-// Deploy on Base Sepolia (chain id 84532) with real Pyth Network feeds.
+// Deploy on Ethereum Sepolia (chain id 11155111) with real Pyth Network feeds.
 // Run:
-//   PRIVATE_KEY=0x... forge script script/DeployBaseSepolia.s.sol:DeployBaseSepoliaScript \
-//     --rpc-url https://sepolia.base.org --broadcast
+//   PRIVATE_KEY=0x... forge script script/DeploySepolia.s.sol:DeploySepoliaScript \
+//     --rpc-url <ETH_SEPOLIA_RPC> --broadcast
 
 import {Script, console} from "forge-std/Script.sol";
 import {PropFund} from "../src/PropFund.sol";
@@ -13,7 +13,7 @@ import {EvalCertRenderer} from "../src/EvalCertRenderer.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
 
-contract MockUSDCBaseSepolia {
+contract MockUSDCSepolia {
     string public constant name = "Mock USDC";
     string public constant symbol = "USDC";
     uint8 public constant decimals = 6;
@@ -29,9 +29,11 @@ contract MockUSDCBaseSepolia {
     function approve(address s, uint256 a) external returns (bool) { allowance[msg.sender][s] = a; return true; }
 }
 
-contract DeployBaseSepoliaScript is Script {
-    // Pyth Network on Base Sepolia (chain id 84532)
-    address constant PYTH = 0xA2aa501b19aff244D90cc15a4Cf739D2725B5729;
+contract DeploySepoliaScript is Script {
+    // Pyth Network on Ethereum Sepolia (chain id 11155111).
+    // Verified against docs.pyth.network EVM contract-address list — DIFFERENT from Base's
+    // 0xA2aa501b19aff244D90cc15a4Cf739D2725B5729.
+    address constant PYTH = 0xDd24F84d36BF92C65F92307595335bdFab5Bbd21;
 
     // Canonical Pyth price IDs (same on every chain — Pyth IDs are global)
     bytes32 constant ETH_USD  = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
@@ -61,9 +63,10 @@ contract DeployBaseSepoliaScript is Script {
         ids[6] = DOGE_USD;
         ids[7] = ARB_USD;
 
-        // Per-feed staleAfter. Crypto majors (ETH/BTC/SOL) get tight 5-min windows since publishers
-        // update them constantly. Mid-caps and L2 narrative get 24h on testnet (Base Sepolia has
-        // fewer Pyth pushers; some feeds idle for hours). Tighten for mainnet deploy.
+        // Per-feed staleAfter (seconds — chain-independent). Crypto majors (ETH/BTC/SOL) get tight
+        // 5-min windows since publishers update them constantly. Mid-caps and L2 narrative get 24h on
+        // testnet (Eth Sepolia, like Base Sepolia, has fewer Pyth pushers; some feeds idle for hours).
+        // Tighten for mainnet deploy.
         uint256[] memory staleAfter = new uint256[](8);
         staleAfter[0] = 5 minutes;   // ETH
         staleAfter[1] = 5 minutes;   // BTC
@@ -76,7 +79,7 @@ contract DeployBaseSepoliaScript is Script {
 
         vm.startBroadcast(pk);
 
-        MockUSDCBaseSepolia usdc = new MockUSDCBaseSepolia();
+        MockUSDCSepolia usdc = new MockUSDCSepolia();
 
         PropFund fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
@@ -84,7 +87,8 @@ contract DeployBaseSepoliaScript is Script {
             treasury: deployer,
             evalFee: 10e6,
             fundedAllocation: 1_000e6,
-            evalDuration: 1_296_000,    // 30 days at 2s blocks on Base
+            evalDuration: 216_000,      // 30 days at ~12s blocks on Ethereum Sepolia
+                                        // (Base uses 1_296_000 at 2s — EVAL_DURATION is block-based)
             traderDeposit: 100e6,
             maxFundedTraders: 50,
             priceIds: ids,
@@ -105,7 +109,7 @@ contract DeployBaseSepoliaScript is Script {
         vm.stopBroadcast();
 
         console.log("");
-        console.log("=== DEPLOYED TO BASE SEPOLIA (real Pyth feeds) ===");
+        console.log("=== DEPLOYED TO ETHEREUM SEPOLIA (real Pyth feeds) ===");
         console.log("PropFund:", address(fund));
         console.log("MockUSDC:", address(usdc));
         console.log("EvalCert:", address(cert));
@@ -115,7 +119,7 @@ contract DeployBaseSepoliaScript is Script {
         console.log("Assets:  ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB (Pyth)");
         console.log("");
         console.log("Next steps:");
-        console.log("  1. Update cli/src/networks.js with these addresses under `baseSepolia`");
+        console.log("  1. Update cli/src/networks.js `sepolia` preset with these addresses");
         console.log("  2. Regenerate cli/src/propfund.abi.json with `forge inspect PropFund abi --json`");
     }
 }

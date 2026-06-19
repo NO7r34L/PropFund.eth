@@ -226,4 +226,4 @@ introduce new attack surface.
 
 ## License
 
-AGPL-3.0-only.
+Apache-2.0. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).

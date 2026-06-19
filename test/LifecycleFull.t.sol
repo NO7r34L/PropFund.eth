@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.26;
 
 // Comprehensive end-to-end walk: hits every external mutating function at least once,
