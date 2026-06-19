@@ -48,6 +48,17 @@ const MIN_WRITE_GAP_SEC = 60;
 // Tighten in production. Set 0 to disable.
 const MAX_DEPOSIT_DRAWDOWN_PCT = Number(process.env.MAX_DEPOSIT_DRAWDOWN_PCT || 25);
 
+// Eval exit management (deterministic — the LLM picks entries, code manages exits).
+// Eval is 1x long-only; passing needs +8% compounded over >=3 closes with <=5% drawdown
+// from peak virtualBalance. Banking wins and cutting losers at the right moment is timing an
+// LLM on a multi-minute tick can't hit, so these rules own the close. The LLM only entries.
+const EVAL_TP_PCT = Number(process.env.EVAL_TP_PCT || 3.0);                    // hard take-profit per trade
+const EVAL_TRAIL_ARM_PCT = Number(process.env.EVAL_TRAIL_ARM_PCT || 1.2);      // arm the trail once up this much
+const EVAL_TRAIL_GIVEBACK_PCT = Number(process.env.EVAL_TRAIL_GIVEBACK_PCT || 0.6); // close if it gives back this from peak
+const EVAL_SL_PCT = Number(process.env.EVAL_SL_PCT || 2.0);                    // cut a loser at -this% (when drawdown-safe)
+const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
+const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
+
 const SYSTEM_PROMPT = `You are an autonomous trader operating a PropFund account on Base.
 
 PROTOCOL RULES (cannot be changed):
@@ -63,9 +74,13 @@ PROTOCOL RULES (cannot be changed):
 - Profit split on real trades: 80% compounds into your deposit, 15% goes to LPs, 5% to the protocol treasury.
 
 YOUR JOB:
-- Pass eval, then trade the funded account profitably. How you do that — entry timing,
-  hold duration, asset selection, exit triggers — is up to you. Read the candles, the
+- Pass eval, then trade the funded account profitably. Read the candles, the
   multi-timeframe signals, your own action history, and decide.
+- DURING EVAL your only decision is the ENTRY. Once you open a virtual trade, the runtime
+  manages the exit automatically (take-profit, trailing stop, and a drawdown-safe stop-loss)
+  and you are not consulted again until it's closed — so don't agonize over closes. Open ONLY
+  on a clean long setup (a non-null best_long_setup at or above the min edge score), on THAT
+  asset; otherwise WAIT. One good entry beats ten mediocre ones.
 - WAIT is always a valid action. There's no penalty for waiting; there is a real cost
   ($10 each cancel, drawdown counts on losses) for low-quality entries.
 
@@ -109,6 +124,8 @@ const STATE = {
     history: [],         // last 20 actions for context — restored from disk on startup
     peakDeposit: 0n,     // peak USDC deposit observed in funded mode (raw 6-decimal). Used
                          // by the drawdown circuit breaker. Persisted across restarts.
+    evalTradePeakR: null, // peak unrealized % of the CURRENT open eval trade — drives the trailing exit
+    fastPoll: false,     // poll on FAST_CADENCE_SEC while a position is open (catch the peak)
 };
 
 // Restore history from disk so the LLM keeps context across container restarts.
@@ -177,6 +194,8 @@ async function readState(propfund, provider, usdc, wallet) {
     // "+0.00%" indistinguishable from "-1.74%" in the LLM's view. Compute the real
     // signed return directly from the raw evals(addr).virtualBalance instead.
     const vbN = Number(evalAccount.virtualBalance ?? 1_000_000_000_000_000_000n) / 1e18;
+    const hwmRaw = Number(evalAccount.highWaterMark ?? 0n) / 1e18;
+    const hwmN = hwmRaw > vbN ? hwmRaw : vbN;  // peak virtualBalance; never below current
     const returnPct = (vbN - 1) * 100;  // signed; can be negative
     const drawdownPct = Number(evalStatus.drawdownBps) / 100;
     const targetPct = Number(evalStatus.targetBps) / 100;
@@ -203,6 +222,8 @@ async function readState(propfund, provider, usdc, wallet) {
     return {
         address: me,
         ethBalanceWei: ethBal,  // kept for guardrail check, stripped before LLM prompt
+        evalVb: vbN,            // helper for deterministic exit logic — stripped before LLM prompt
+        evalHwm: hwmN,          // peak virtualBalance — stripped before LLM prompt
         balances: {
             eth: formatUnits(ethBal, 18),
             usdc: formatUnits(usdcBal, 6),
@@ -382,6 +403,37 @@ function computeSignals(candles, currentPrice) {
 // action names ("OPEN_LONG") and tried funded-only actions while in eval — the whitelist
 // stops those from ever reaching the contract and surfaces a clear list in the prompt so
 // the LLM doesn't have to derive it from the action reference.
+// Deterministic eval-trade exit. Eval is 1x long-only and drawdown is realized only at close
+// (virtualBalance *= spot/entry), so the right policy is: bank wins, trail a fading win before
+// it round-trips, and cut a loser early ONLY while realizing it stays above the 5%-from-peak
+// fail floor. Returns a reason string to close now, or null to keep holding.
+function evalExitDecision(state) {
+    const open = state.eval?.open_trade;
+    if (!open || !open.current_trade_can_close) return null;  // 10-block hold not satisfied
+    const r = open.unrealized_return_value;                   // signed % since entry
+    const peak = STATE.evalTradePeakR ?? r;
+    const vb = state.evalVb ?? 1;
+    const hwm = Math.max(state.evalHwm ?? vb, vb);
+
+    // 1. Hard take-profit — bank a strong win toward the +8% target.
+    if (r >= EVAL_TP_PCT) return `take-profit +${r.toFixed(2)}% >= ${EVAL_TP_PCT}%`;
+
+    // 2. Trailing stop — a win that armed and is now fading; lock it before it round-trips to flat.
+    if (peak >= EVAL_TRAIL_ARM_PCT && r > 0 && r <= peak - EVAL_TRAIL_GIVEBACK_PCT) {
+        return `trailing-stop: peaked +${peak.toFixed(2)}%, now +${r.toFixed(2)}% (gave back >=${EVAL_TRAIL_GIVEBACK_PCT}%)`;
+    }
+
+    // 3. Stop-loss — cut a loser, but only if realizing it doesn't breach the drawdown floor.
+    if (r <= -EVAL_SL_PCT) {
+        const newVb = vb * (1 + r / 100);
+        const floor = hwm * (1 - EVAL_DRAWDOWN_FAIL_BPS / 10_000);
+        if (newVb > floor * 1.002) return `stop-loss ${r.toFixed(2)}% <= -${EVAL_SL_PCT}% (drawdown-safe)`;
+        // Otherwise cutting now would FAIL the eval on drawdown — hold; the price recovering back
+        // above the floor (or to profit) will trigger the trailing/take-profit branch instead.
+    }
+    return null;
+}
+
 function computeValidActions(state) {
     if (state.funded?.active) {
         if (state.position) {
@@ -408,7 +460,7 @@ function computeValidActions(state) {
 
 function buildUserPrompt(state, candles, signals, multiSignals) {
     // Strip BigInts and helper-only fields before serializing.
-    const { ethBalanceWei, ...stateForLlm } = state;
+    const { ethBalanceWei, evalVb, evalHwm, ...stateForLlm } = state;
     if (stateForLlm.eval?.open_trade?.unrealized_return_value !== undefined) {
         const { unrealized_return_value, ...openClean } = stateForLlm.eval.open_trade;
         stateForLlm.eval = { ...stateForLlm.eval, open_trade: openClean };
@@ -437,6 +489,18 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     }
     if (state.eval.passed) {
         hints.push(`EVAL PASSED. Next step is CLAIM_FUNDING.`);
+    }
+    // Eval entry directive: the code owns exits, so the LLM's only eval job is a clean LONG entry.
+    if (state.eval.active && !state.eval.passed && !state.eval.in_virtual_trade) {
+        const best = multiSignals?.best_long_setup;
+        hints.push(
+            `EVAL ENTRY MODE. Exits are AUTOMATED (take-profit/trailing/stop run in code once you open) — ` +
+            `do NOT plan the close, just pick the best LONG entry. Open ONLY when ALL-ASSET SIGNALS show a ` +
+            `non-null best_long_setup (score >= ${MIN_EDGE_SCORE}); OPEN_EVAL_TRADE on THAT asset, not a default like ETH. ` +
+            (best ? `Right now best_long_setup = ${best.asset} (score ${best.score}, ${best.trend_15m}/${best.trend_1h}). ` :
+                    `Right now best_long_setup is null — no clean setup, so WAIT. `) +
+            `A weak or forced entry just burns the window; WAIT costs nothing.`
+        );
     }
     // No pre-eval / funded "you should trade X" hints. The model has access to all
     // per-asset signals and candle data; picking what (and whether) to trade is its job.
@@ -727,6 +791,21 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
     }
 }
 
+// Append one action to the rolling history (in-memory + disk so it survives restarts).
+function pushHistory(action, args, result, reasoning) {
+    const histEntry = {
+        ts: new Date().toISOString(),
+        action,
+        args: args ?? null,
+        ok: result.ok,
+        error: result.error ?? null,
+        reasoning: reasoning?.slice(0, 200),
+    };
+    STATE.history.push(histEntry);
+    if (STATE.history.length > 20) STATE.history.shift();
+    try { appendFileSync(HISTORY_PATH, JSON.stringify(histEntry) + '\n'); } catch {}
+}
+
 async function tick(ctx) {
     const { propfund, provider, usdc, wallet } = ctx;
     const state = await readState(propfund, provider, usdc, wallet);
@@ -745,6 +824,37 @@ async function tick(ctx) {
         const currentDeposit = parseUnits(state.funded.deposit_usdc, 6);
         recordPeakDeposit(currentDeposit);
     }
+
+    // Poll faster while any position is open so the exit logic catches the peak (a +3% spike
+    // can fully reverse inside one 5-minute idle tick). Idle/entry-hunting stays on CADENCE_SEC.
+    STATE.fastPoll = Boolean(state.eval?.in_virtual_trade) || Boolean(state.position);
+
+    // --- Eval position: deterministic exit management (no LLM call) ---
+    // Eval is 1x long-only; once a trade is open the close is rule-based (take-profit / trailing /
+    // drawdown-safe stop in evalExitDecision) — timing an LLM can't hit on a multi-minute tick.
+    // The LLM owns ENTRIES; here we either fire a rule-based exit or hold, skipping the
+    // (paralysis-prone, costly) LLM close call entirely.
+    if (state.eval?.active && state.eval?.in_virtual_trade) {
+        const open = state.eval.open_trade;
+        const r = open?.unrealized_return_value ?? 0;
+        STATE.evalTradePeakR = STATE.evalTradePeakR === null ? r : Math.max(STATE.evalTradePeakR, r);
+
+        const exitReason = open?.current_trade_can_close ? evalExitDecision(state) : null;
+        if (exitReason) {
+            const result = await executeAction({ action: 'CLOSE_EVAL_TRADE', reasoning: exitReason }, propfund, usdc, wallet, state, ctx.net);
+            log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'eval-exit-ok' : 'eval-exit-failed', { reason: exitReason, ...result });
+            if (result.ok) STATE.evalTradePeakR = null;
+            pushHistory('CLOSE_EVAL_TRADE', null, result, exitReason);
+        } else {
+            log('EXEC', 'eval-hold', {
+                unrealized: open?.unrealized_return,
+                peak: STATE.evalTradePeakR != null ? `${STATE.evalTradePeakR.toFixed(3)}%` : null,
+                can_close: Boolean(open?.current_trade_can_close),
+            });
+        }
+        return;
+    }
+    STATE.evalTradePeakR = null;  // no open eval trade — reset the trailing tracker
 
     // Per-trade asset selection means we need all-asset signals everywhere except mid-trade
     // (where the asset is locked until close — focus on the open trade's asset only).
@@ -790,18 +900,7 @@ async function tick(ctx) {
     const result = await executeAction(llmResult.parsed, propfund, usdc, wallet, state, ctx.net);
     log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'action-ok' : 'action-failed', result);
 
-    const histEntry = {
-        ts: new Date().toISOString(),
-        action: llmResult.parsed.action,
-        args: llmResult.parsed.args ?? null,
-        ok: result.ok,
-        error: result.error ?? null,
-        reasoning: llmResult.parsed.reasoning?.slice(0, 200),
-    };
-    STATE.history.push(histEntry);
-    if (STATE.history.length > 20) STATE.history.shift();
-    // Persist so the next container restart resumes with context.
-    try { appendFileSync(HISTORY_PATH, JSON.stringify(histEntry) + '\n'); } catch {}
+    pushHistory(llmResult.parsed.action, llmResult.parsed.args ?? null, result, llmResult.parsed.reasoning);
 
     STATE.actionsTaken++;
     if (STATE.actionsTaken >= MAX_ACTIONS) {
@@ -844,6 +943,8 @@ async function main() {
         restoredHistoryCount: STATE.history.length,
         peakDeposit: STATE.peakDeposit.toString(),
         maxDepositDrawdownPct: MAX_DEPOSIT_DRAWDOWN_PCT,
+        evalExit: { tpPct: EVAL_TP_PCT, trailArmPct: EVAL_TRAIL_ARM_PCT, trailGivebackPct: EVAL_TRAIL_GIVEBACK_PCT, slPct: EVAL_SL_PCT },
+        fastCadenceSec: FAST_CADENCE_SEC,
     });
 
     let stopped = false;
@@ -858,7 +959,9 @@ async function main() {
             log('ERROR', 'tick-error', { error: e.message, stack: e.stack?.slice(0, 500) });
         }
         if (stopped) break;
-        await new Promise(r => setTimeout(r, CADENCE_SEC * 1000));
+        // Fast poll while a position is open (catch the exit peak), normal cadence while idle.
+        const sleepSec = STATE.fastPoll ? FAST_CADENCE_SEC : CADENCE_SEC;
+        await new Promise(r => setTimeout(r, sleepSec * 1000));
     }
     log('INFO', 'agent-stop', { actionsTaken: STATE.actionsTaken });
 }
