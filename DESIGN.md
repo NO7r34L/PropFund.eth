@@ -12,17 +12,21 @@ The choices below are deliberate. The most important ones are about what the con
 **does not** promise — state them out loud so they aren't mistaken for omissions.
 
 **The load-bearing invariant: the pool can always pay.** Solvency is structural, not
-monitored. Every obligation is funded before it can exist:
+monitored. Every obligation is funded before it can exist. (Citations anchor on **function
+names** — the stable reference; line numbers are current as of this revision and may drift on
+later edits.)
 
-- **Escrow-first** — opening a trade moves the *entire notional* out of `poolBalance` into
-  `totalDeployed` up front (`src/PropFund.sol:1016-1018`). Nothing settles on credit.
-- **Profit capped at deployed** — a win can never pay more than the capital escrowed for it
-  (`if (profit > deployedPortion) profit = deployedPortion`, `src/PropFund.sol:1150`).
-- **Loss capped at margin** — a loss costs the trader at most the position margin; the other
-  ≥50% of deposit always survives (`_handleLoss`, `src/PropFund.sol:1207-1216`).
-- **Per-trade circuit breaker** — settlement PnL uses a price move capped at ±50% from entry
-  (`CIRCUIT_BREAKER_BPS`, `src/PropFund.sol:1396-1401`).
-- **LP withdrawals can't overdraw** — `payout > poolBalance` reverts (`src/PropFund.sol:616`).
+- **Escrow-first** — `_openTrade` moves the *entire notional* out of `poolBalance` into
+  `totalDeployed` the moment a position opens (`src/PropFund.sol:1017`). Nothing settles on credit.
+- **Profit capped at deployed** — in `_closeTrade`, a win can never pay more than the capital
+  escrowed for it: `if (profit > deployedPortion) profit = deployedPortion` (`src/PropFund.sol:1152`).
+- **Loss capped at margin** — `_handleLoss` absorbs at most the position margin
+  (`absorbed = loss > margin ? margin : loss`, `src/PropFund.sol:1213`); the other ≥50% of the
+  deposit always survives.
+- **Per-trade circuit breaker** — `_calcPnl` caps the settlement price move at ±50% from entry
+  (`CIRCUIT_BREAKER_BPS`, `src/PropFund.sol:1398`).
+- **LP withdrawals can't overdraw** — `withdraw` reverts when `payout > poolBalance`
+  (`src/PropFund.sol:616`).
 
 You don't have to trust an operator or a bot to keep this solvent — solvency falls out of the
 accounting.
@@ -41,9 +45,10 @@ contract, not inside it.
 and basic risk discipline (can an agent run the full lifecycle and respect a drawdown budget).
 Enforcement is split by what each layer *can* guarantee:
 
-- **On-chain = risk bounds** (must be trustless): mandatory TP *and* SL (`_validateExit`,
-  `src/PropFund.sol:1014`), 50% margin rule (`:1005`), fair-partition notional cap (`:1011`),
-  level-gated leverage (`:999`), per-trade circuit breaker.
+- **On-chain = risk bounds** (must be trustless) — all gated in `_openTrade`: mandatory TP *and*
+  SL via `_validateExit` (`src/PropFund.sol:1014`), the 50% margin rule (`:1005`), the
+  fair-partition notional cap (`:1011`), and level-gated leverage (`:999`); plus the per-trade
+  circuit breaker in `_calcPnl`.
 - **Agent layer = strategy** (off-chain by nature): edge-gated entries, deterministic
   take-profit / trailing / drawdown-safe-stop exits, and a deposit-drawdown halt
   (`MAX_DEPOSIT_DRAWDOWN_PCT`, default 25%) — see `cli/scripts/agent.js`.
@@ -105,7 +110,9 @@ The LP pool is the counterparty to every trade:
 - Trader loses → pool keeps it (capped at the position's margin; anything beyond is
   absorbed by LPs as cost of business)
 
-No swaps. No slippage. No order book. No MEV-able fills. PnL settles against Pyth at
+No swaps. No slippage. No order book. No *fill* MEV — there are no fills to front-run or
+sandwich. (Settlement is at the oracle price of the chosen open/close block, so the close
+*tick* is the trader's own timing lever, not a searcher's edge.) PnL settles against Pyth at
 the trader's open and close times. Pyth is **pull-based**: callers (traders, keepers)
 push fresh signed VAA bundles via `pushPyth(updateData)` before any price-sensitive
 write so the contract sees live prices.
@@ -174,7 +181,7 @@ The Base mainnet deploy lists 8 assets: ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, A
 
 | Role     | What they do                                                                  | What they earn                                                  |
 | ---      | ---                                                                           | ---                                                             |
-| Trader   | Pay eval, prove skill, trade                                                  | 80% of profit (compounds into deposit)                          |
+| Trader   | Pay eval, pass the liveness gate, trade                                       | 80% of profit (compounds into deposit)                          |
 | LP       | Deposit USDC                                                                  | Failed eval fees + 15% of trader profit + counterparty wins     |
 | Treasury | Deploy, `addFeeds`, `setPaused`, `withdrawTreasury`                           | 5% of trader profit — funds operations, maintenance, version support |
 | Keeper   | `liquidate`, `executeExit`, `forceClose`, `processFundingQueue`, `expireEval` | None on-chain yet (TODO)                                         |
@@ -228,7 +235,7 @@ The Base mainnet deploy lists 8 assets: ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, A
 
 ## File map
 
-- `src/PropFund.sol` — main contract (~1340 lines)
+- `src/PropFund.sol` — main contract (~1660 lines)
 - `src/EvalCert.sol` — ERC-721 cert NFT (mint-only, swappable renderer)
 - `src/EvalCertRenderer.sol` — fully on-chain SVG renderer (procedural per-trader chart)
 - `src/interfaces/` — IERC20, IPyth

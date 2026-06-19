@@ -63,7 +63,8 @@ service, no human in the loop.
   decode to friendly names (`EvalNotPassed`, `InvalidExit`, `CancelCooldown`, …).
 - **Public keeper paths.** All maintenance actions are permissionless; bots compete
   on gas.
-- **Deterministic execution.** Oracle-settled, no orderbook, no MEV-able fills.
+- **Deterministic execution.** Oracle-settled, no orderbook, no fill MEV (no fills to
+  front-run or sandwich).
 - **Single immutable contract.** No proxy, no upgrades, no rule changes after deploy.
 
 ## Quickstart
@@ -120,7 +121,7 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
 | **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands signed VAA on-chain. Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
-| **Settlement** | Pure oracle. No swaps, DEX, slippage, or MEV |
+| **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |
 | **Counterparty** | LP pool. Pays winners 80% trader / 15% LP / 5% treasury. Absorbs losses up to position margin |
 | **Reentrancy** | Cancun transient storage (TLOAD/TSTORE) |
 | **Pause** | Treasury-gated emergency stop. Blocks new opens; exits/withdrawals stay open |
