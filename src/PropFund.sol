@@ -460,9 +460,14 @@ contract PropFund {
 
     /// @notice FIFO queue of traders who passed eval but were waiting for capacity at claim time.
     /// Each queued trader has their TRADER_DEPOSIT escrowed until either funded by
-    /// processFundingQueue or refunded via leaveFundingQueue.
+    /// processFundingQueue or refunded via leaveFundingQueue. Append-only with a moving head
+    /// (fundingQueueHead): dequeue and leave are O(1) — vacated slots are zeroed in place
+    /// (lazy tombstones) and skipped on drain, never front-shifted.
     address[] public fundingQueue;
-    /// @dev 1-indexed into fundingQueue; 0 = not in queue.
+    /// @notice Index of the queue front in `fundingQueue`. Live queue is the non-zero entries
+    /// in fundingQueue[fundingQueueHead..length).
+    uint256 public fundingQueueHead;
+    /// @dev Absolute 1-based index into fundingQueue (array index + 1); 0 = not in queue.
     mapping(address => uint256) internal queueIdx;
     /// @notice Sum of escrowed TRADER_DEPOSITs awaiting funding. Tracked separately from
     /// poolBalance so LP accounting isn't polluted by transient escrow.
@@ -855,7 +860,7 @@ contract PropFund {
             USDC.safeTransferFrom(actor, address(this), TRADER_DEPOSIT);
             unchecked { queuedDeposits += TRADER_DEPOSIT; }
             fundingQueue.push(actor);
-            queueIdx[actor] = fundingQueue.length;
+            queueIdx[actor] = fundingQueue.length; // absolute 1-based slot
             emit FundingQueued(actor, fundingQueue.length);
         }
     }
@@ -878,31 +883,33 @@ contract PropFund {
     }
 
     /// @notice Drain the funding queue while the pool has capacity. Anyone can call.
-    /// @param max Maximum number of traders to advance in this call (gas guard).
+    /// @param max Maximum queue slots to process this call (gas guard). Bounds both funded
+    ///        advances and skips of vacated (left) slots, so one call is always gas-bounded.
+    /// @dev O(1) per slot: the front pointer (fundingQueueHead) advances and vacated slots are
+    ///      skipped — no array front-shift. Liveness holds across calls because the head pointer
+    ///      is persisted, so a later call resumes exactly where this one stopped.
     function processFundingQueue(uint256 max) external nonReentrant {
-        uint256 advanced;
-        while (advanced < max && fundingQueue.length > 0) {
+        uint256 head = fundingQueueHead;
+        uint256 len = fundingQueue.length;
+        for (uint256 steps; steps < max && head < len; steps++) {
+            address h = fundingQueue[head];
+            if (h == address(0)) {
+                // Slot vacated by leaveFundingQueue — skip it (costs one step).
+                unchecked { head++; }
+                continue;
+            }
             if (poolBalance < TRADER_DEPOSIT * 2) break;
             if (fundedTraders.length >= MAX_FUNDED_TRADERS) break;
 
-            address head = fundingQueue[0];
-            // O(n) front-shift — bounded by MAX_FUNDED_TRADERS so worst-case ~50 sloads.
-            uint256 last = fundingQueue.length;
-            for (uint256 i = 1; i < last; i++) {
-                address shifted = fundingQueue[i];
-                fundingQueue[i - 1] = shifted;
-                queueIdx[shifted] = i;
-            }
-            fundingQueue.pop();
-            delete queueIdx[head];
+            delete fundingQueue[head];
+            delete queueIdx[h];
+            unchecked { head++; queuedDeposits -= TRADER_DEPOSIT; }
 
-            unchecked { queuedDeposits -= TRADER_DEPOSIT; }
-            evals[head].passed = false;
-            _markFunded(head);
-            emit FundingClaimed(head, FUNDED_ALLOCATION);
-
-            unchecked { advanced += 1; }
+            evals[h].passed = false;
+            _markFunded(h);
+            emit FundingClaimed(h, FUNDED_ALLOCATION);
         }
+        fundingQueueHead = head;
     }
 
     /// @notice Refund the escrowed TRADER_DEPOSIT and remove the caller from the funding queue.
@@ -918,14 +925,9 @@ contract PropFund {
         uint256 idx = queueIdx[actor];
         if (idx == 0) revert NotQueued();
 
-        // Front-shift everyone behind the leaver.
-        uint256 last = fundingQueue.length;
-        for (uint256 i = idx; i < last; i++) {
-            address shifted = fundingQueue[i];
-            fundingQueue[i - 1] = shifted;
-            queueIdx[shifted] = i;
-        }
-        fundingQueue.pop();
+        // O(1) tombstone: zero the leaver's slot in place. Drain (processFundingQueue) and the
+        // queuePosition view skip zeroed slots, so order is preserved without front-shifting.
+        delete fundingQueue[idx - 1];
         delete queueIdx[actor];
 
         unchecked { queuedDeposits -= TRADER_DEPOSIT; }
@@ -1467,16 +1469,25 @@ contract PropFund {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Total traders waiting in the FIFO funding queue.
-    /// @return Number of queued traders.
+    /// @return Number of live queued traders (excludes vacated slots).
     function queueLength() external view returns (uint256) {
-        return fundingQueue.length;
+        // Each live entry escrows exactly one TRADER_DEPOSIT, so the live count is exact and O(1).
+        return queuedDeposits / TRADER_DEPOSIT;
     }
 
-    /// @notice 1-indexed position of `trader` in the queue. 0 = not queued.
+    /// @notice 1-indexed live position of `trader` in the queue. 0 = not queued.
     /// @param trader Address to look up.
-    /// @return 1-based queue position, or 0 if not queued.
+    /// @return 1-based place in line (next-to-fund = 1), or 0 if not queued.
+    /// @dev View-only O(n) over the queue tail: counts live (non-tombstoned) entries from the
+    ///      head up to the trader's slot. State mutations stay O(1); this cost is off-chain only.
     function queuePosition(address trader) external view returns (uint256) {
-        return queueIdx[trader];
+        uint256 abs = queueIdx[trader];
+        if (abs == 0) return 0;
+        uint256 pos;
+        for (uint256 i = fundingQueueHead; i < abs; i++) {
+            if (fundingQueue[i] != address(0)) pos++;
+        }
+        return pos;
     }
 
     function _effectiveCapInternal(uint256 traderDeposit) internal view returns (uint256) {
