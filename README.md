@@ -7,16 +7,13 @@ runs from a CLI, a script, or any client that can sign EVM transactions. **No we
 backend. No upgrades. No admin that can change rules.** The LP pool is the counterparty,
 Pyth Network prices are settlement.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Trader / script                                                 │
-│       │                                                          │
-│       ▼                                                          │
-│  propfund CLI (ethers.js)  ──────►  Base / PropFund contract     │
-│                                          │                       │
-│                                          ▼                       │
-│                                Pyth Network (signed VAA pull)    │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Agent["Trader / AI agent / script"] -->|signs EVM txs| CLI["propfund CLI (ethers.js)"]
+    CLI -->|eval, fund, trade, withdraw| Contract["PropFund contract (immutable, on-chain)"]
+    Keeper["Keeper bot (permissionless)"] -->|liquidate, settle, force-close| Contract
+    Contract <-->|signed price VAAs| Pyth["Pyth Network (settlement)"]
+    Contract <-->|counterparty, 80/15/5 split| Pool["LP pool"]
 ```
 
 ## How it works
