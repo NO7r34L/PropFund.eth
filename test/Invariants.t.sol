@@ -159,6 +159,30 @@ contract Handler is Test {
         pyth.setSpotE8(BTC_ID, 60000e8);
     }
 
+    /// Adversarial oracle: randomly make a feed wide-conf or stale (future publishTime), then
+    /// route through the keeper/exit paths. This drives `_tryReadSpot` into its fresh=false
+    /// branches (M-1 confidence guard + staleness guard) inside the stateful campaign, so the
+    /// solvency invariants are exercised while the oracle is degraded — not just in unit tests.
+    /// Normal handlers (evalCycle/closeTrade/liquidate) re-stamp fresh prices, so it self-heals.
+    function degradeOracle(uint256 mode, uint256 priceSeed, uint256 targetSeed) external {
+        bytes32 id = (priceSeed & 1) == 0 ? ETH_ID : BTC_ID;
+        uint256 px = id == ETH_ID ? bound(priceSeed, 2000e8, 6000e8) : bound(priceSeed, 30000e8, 100000e8);
+
+        if (mode % 2 == 0) {
+            // Confidence interval far wider than MAX_CONF_BPS (0.5%) — guard must reject as not-fresh.
+            pyth.setSpotE8WithConf(id, int256(px), uint64(px));
+        } else {
+            // Future publishTime — treated as stale regardless of the current block timestamp.
+            pyth.setPrice(id, int64(int256(px)), -8, block.timestamp + 1 hours);
+        }
+
+        // Exercise the cached-spot fallback in the keeper/exit paths while the feed is degraded.
+        address target = _pickActor(targetSeed);
+        vm.prank(_pickActor(priceSeed)); try fund.liquidate(target) {} catch {}
+        vm.prank(target); try fund.executeExit(target) {} catch {}
+        vm.prank(target); try fund.emergencyClose() {} catch {}
+    }
+
     function actorCount() external view returns (uint256) {
         return actors.length;
     }
@@ -214,7 +238,7 @@ contract InvariantTest is Test {
         targetContract(address(handler));
 
         // Limit fuzz selectors to handler functions (excludes view helpers)
-        bytes4[] memory selectors = new bytes4[](12);
+        bytes4[] memory selectors = new bytes4[](13);
         selectors[0]  = Handler.depositLP.selector;
         selectors[1]  = Handler.withdrawLP.selector;
         selectors[2]  = Handler.startEval.selector;
@@ -227,6 +251,7 @@ contract InvariantTest is Test {
         selectors[9]  = Handler.resignFunding.selector;
         selectors[10] = Handler.liquidate.selector;
         selectors[11] = Handler.moveBlocks.selector;
+        selectors[12] = Handler.degradeOracle.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
