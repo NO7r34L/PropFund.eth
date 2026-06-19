@@ -222,9 +222,13 @@ via `withdrawTreasury`. Recommended in production: a multisig.
 
 ## Contributing
 
-Issues and PRs welcome. Please run `forge test` and `forge fmt` before submitting; new
+Issues and PRs welcome. **`main` is the stable branch — don't commit to it directly.**
+Branch off `main` (`feat/…`, `fix/…`, `docs/…`) and open a pull request; CI must pass.
+Running an autonomous agent against this repo? **Give each agent its own branch and one
+PR per task** — isolated branches keep parallel human/agent work conflict-free and every
+change independently reviewable. Run `forge test` and `forge fmt` before submitting; new
 state-mutating paths need test coverage and an entry in `THREAT_MODEL.md` if they
-introduce new attack surface.
+introduce new attack surface. Full workflow in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Contact
 
