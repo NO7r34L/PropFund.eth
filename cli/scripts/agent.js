@@ -23,8 +23,8 @@
 //   - Hard cap of 100 total actions per run
 
 import { formatUnits, parseUnits, getAddress } from 'ethers';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { buildContext } from '../src/context.js';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { buildContext, assertAssetMapping } from '../src/context.js';
 import { decodeError } from '../src/errors.js';
 import { resolveNetwork } from '../src/networks.js';
 
@@ -36,10 +36,17 @@ const LOG_PATH = process.env.AGENT_LOG || '/tmp/propfund-agent.log';
 // Persistent action history — survives container restart. Stored next to AGENT_LOG so
 // the volume mount keeps it across redeploys.
 const HISTORY_PATH = process.env.AGENT_HISTORY || (LOG_PATH.replace(/\.log$/, '') + '-history.jsonl');
+const PEAK_DEPOSIT_PATH = process.env.AGENT_PEAK_DEPOSIT || (LOG_PATH.replace(/\.log$/, '') + '-peak.json');
 const MIN_ETH_WEI = 1_000_000_000_000_000n;  // 0.001
 const MAX_ACTIONS = Number(process.env.AGENT_MAX_ACTIONS || 100);
 const MAX_EVAL_CANCELS = 3;
 const MIN_WRITE_GAP_SEC = 60;
+// Drawdown circuit breaker for FUNDED MODE. Once an agent's deposit drops below
+// peak × (1 - MAX_DEPOSIT_DRAWDOWN_PCT/100), refuse new OPEN_TRADE. The contract's
+// 50% margin rule caps loss-per-trade; this protects against death-by-1000-cuts where
+// an agent steadily bleeds the deposit across many small losing trades. Default 25%.
+// Tighten in production. Set 0 to disable.
+const MAX_DEPOSIT_DRAWDOWN_PCT = Number(process.env.MAX_DEPOSIT_DRAWDOWN_PCT || 25);
 
 const SYSTEM_PROMPT = `You are an autonomous trader operating a PropFund account on Base.
 
@@ -99,7 +106,9 @@ const STATE = {
     actionsTaken: 0,
     evalCancels: 0,
     lastWriteTime: 0,
-    history: [],   // last 20 actions for context — restored from disk on startup
+    history: [],         // last 20 actions for context — restored from disk on startup
+    peakDeposit: 0n,     // peak USDC deposit observed in funded mode (raw 6-decimal). Used
+                         // by the drawdown circuit breaker. Persisted across restarts.
 };
 
 // Restore history from disk so the LLM keeps context across container restarts.
@@ -114,6 +123,30 @@ function restoreHistory() {
         // Corrupted history shouldn't block startup — log and continue with empty history.
         process.stderr.write(`history-restore failed: ${e.message}\n`);
     }
+}
+
+function restorePeakDeposit() {
+    if (!existsSync(PEAK_DEPOSIT_PATH)) return;
+    try {
+        const obj = JSON.parse(readFileSync(PEAK_DEPOSIT_PATH, 'utf8'));
+        STATE.peakDeposit = BigInt(obj.peak ?? 0);
+    } catch (e) {
+        process.stderr.write(`peak-deposit-restore failed: ${e.message}\n`);
+    }
+}
+
+function recordPeakDeposit(currentDepositRaw) {
+    if (currentDepositRaw <= STATE.peakDeposit) return;
+    STATE.peakDeposit = currentDepositRaw;
+    try { writeFileSync(PEAK_DEPOSIT_PATH, JSON.stringify({ peak: STATE.peakDeposit.toString() })); } catch {}
+}
+
+function depositDrawdownPct(currentDepositRaw) {
+    if (STATE.peakDeposit === 0n) return 0;
+    if (currentDepositRaw >= STATE.peakDeposit) return 0;
+    // bps with 2 decimals, then to %
+    const bps = ((STATE.peakDeposit - currentDepositRaw) * 10_000n) / STATE.peakDeposit;
+    return Number(bps) / 100;
 }
 
 function log(level, event, data) {
@@ -138,7 +171,13 @@ async function readState(propfund, provider, usdc, wallet) {
     const blocksSinceOpen = tradeOpenBlock > 0 ? blockNumber - tradeOpenBlock : 0;
     // Format pct values as labelled strings so the LLM can't mistake a basis-point fraction
     // (e.g. 0.09 means 0.09%, NOT 9%). Mercury and qwen3 both got this wrong on raw numerics.
-    const returnPct = Number(evalStatus.returnBps) / 100;
+    //
+    // BUG WORKAROUND: contract's getEvalStatus.returnBps is uint256 and only set when
+    // virtualBalance >= 1e18 — i.e. it CLAMPS NEGATIVE RETURNS AT ZERO. That makes
+    // "+0.00%" indistinguishable from "-1.74%" in the LLM's view. Compute the real
+    // signed return directly from the raw evals(addr).virtualBalance instead.
+    const vbN = Number(evalAccount.virtualBalance ?? 1_000_000_000_000_000_000n) / 1e18;
+    const returnPct = (vbN - 1) * 100;  // signed; can be negative
     const drawdownPct = Number(evalStatus.drawdownBps) / 100;
     const targetPct = Number(evalStatus.targetBps) / 100;
     const inVirtualTrade = Boolean(evalStatus.inTrade);
@@ -174,9 +213,9 @@ async function readState(propfund, provider, usdc, wallet) {
             passed: Boolean(evalStatus.passed),
             asset_id: evalAssetId,
             asset_name: ASSET_SYMS[evalAssetId] ?? `asset_${evalAssetId}`,
-            cumulative_return: `${returnPct.toFixed(2)}%`,
+            cumulative_return: `${returnPct >= 0 ? '+' : ''}${returnPct.toFixed(2)}%`,
             target_return: `${targetPct.toFixed(2)}%`,
-            return_gap_to_pass: `${Math.max(0, targetPct - returnPct).toFixed(2)}%`,
+            return_gap_to_pass: `${(targetPct - returnPct).toFixed(2)}%`,
             peak_to_trough_drawdown: `${drawdownPct.toFixed(2)}%`,
             max_drawdown_allowed: '5.00%',
             trades_done: Number(evalStatus.tradeCount),
@@ -446,15 +485,10 @@ async function askLLM(messages) {
         // for verbose reasoning models without burning budget on runaway completions.
         max_tokens: 800,
     };
-    // Anthropic prompt caching via OpenRouter (auto-mode). OpenRouter forwards this to
-    // Anthropic only and applies the cache breakpoint to the largest stable prefix it
-    // finds. NOTE: each Anthropic model has a minimum cacheable-prefix size — Haiku 3.5 +
-    // older Haiku tiers require ≥2048 tokens; Sonnet/Opus require ≥1024. If the cacheable
-    // prefix is below that floor the directive is silently dropped (no error, no cache hit).
-    // Today our system prompt is ~1400 tokens, so on claude-haiku-4.5 this is a no-op until
-    // the prompt grows or we move to a model with a smaller floor. Keeping the field in
-    // place so it kicks in automatically when one of those happens.
-    if (IS_OPENROUTER) body.cache_control = { type: 'ephemeral' };
+    // (Top-level `cache_control` removed — per-block on the system message above is the
+    // correct breakpoint. Top-level was causing write-without-read every tick because
+    // OpenRouter places its auto-breakpoint at the end of the user message, which is fresh
+    // each call.)
     // Force structured-JSON mode on every backend that supports it. OpenRouter passes this
     // through to upstream providers (Anthropic, OpenAI, etc.); local Ollama also honours it.
     // Eliminates a class of "model wrapped JSON in prose" parse failures.
@@ -613,7 +647,24 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
                 const lev = Number(a.leverage ?? 1);
                 const marginRaw = parseUnits(String(a.margin_usdc ?? '0'), 6);
                 if (!state.funded.active) throw new Error('not funded');
-                const maxMargin = parseUnits(state.funded.deposit_usdc, 6) / 2n;
+                const currentDeposit = parseUnits(state.funded.deposit_usdc, 6);
+
+                // Drawdown circuit breaker — refuse new trades if deposit has lost
+                // MAX_DEPOSIT_DRAWDOWN_PCT from peak. The contract's 50% margin rule caps
+                // single-trade loss; this guards against death-by-1000-cuts. Operator can
+                // raise the cap, take a winner to recover, or resign to bypass.
+                if (MAX_DEPOSIT_DRAWDOWN_PCT > 0) {
+                    const dd = depositDrawdownPct(currentDeposit);
+                    if (dd >= MAX_DEPOSIT_DRAWDOWN_PCT) {
+                        throw new Error(
+                            `deposit drawdown ${dd.toFixed(2)}% >= MAX_DEPOSIT_DRAWDOWN_PCT=${MAX_DEPOSIT_DRAWDOWN_PCT}% ` +
+                            `(peak ${formatUnits(STATE.peakDeposit, 6)} USDC, current ${state.funded.deposit_usdc} USDC). ` +
+                            `OPEN_TRADE refused. Either raise the cap, hold for a winning close, or resignFunding to exit.`
+                        );
+                    }
+                }
+
+                const maxMargin = currentDeposit / 2n;
                 if (marginRaw > maxMargin) throw new Error(`margin > max margin (${state.funded.deposit_usdc}/2)`);
                 const sizeBps = (marginRaw * 10_000n) / maxMargin;
                 if (sizeBps === 0n) throw new Error('margin too small');
@@ -688,6 +739,13 @@ async function tick(ctx) {
         return;
     }
 
+    // Track peak funded deposit so the drawdown circuit breaker has a baseline. Persists
+    // across container restarts via PEAK_DEPOSIT_PATH.
+    if (state.funded?.active && state.funded.deposit_usdc) {
+        const currentDeposit = parseUnits(state.funded.deposit_usdc, 6);
+        recordPeakDeposit(currentDeposit);
+    }
+
     // Per-trade asset selection means we need all-asset signals everywhere except mid-trade
     // (where the asset is locked until close — focus on the open trade's asset only).
     const symbols = state.assets.map(a => a.name);
@@ -709,6 +767,12 @@ async function tick(ctx) {
           )
         : null;
 
+    // Prompt caching disabled. Anthropic prompt caching via OpenRouter's /chat/completions
+    // endpoint doesn't deliver: empirically `cache_write_tokens` lands but `cached_tokens`
+    // stays 0 across follow-up calls — caching the full prompt-with-fresh-user-message
+    // every tick, paying the 1.25x write premium, never benefiting from reads. Real fix
+    // would be to call OpenRouter's /api/v1/messages (Anthropic-native passthrough) instead
+    // and place the cache breakpoint at the system/user boundary.
     const messages = [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: buildUserPrompt(state, candles, signals, multiSignals) },
@@ -756,7 +820,19 @@ async function main() {
         process.exit(1);
     }
     const ctx = buildContext({ requireSigner: true });
+
+    // Asset-mapping runtime guard: catches networks.js drift vs on-chain priceIds before
+    // any tx goes out. Hard-fail at startup rather than silently trade the wrong asset.
+    try {
+        await assertAssetMapping(ctx.propfund, ctx.net);
+    } catch (e) {
+        process.stderr.write(`FATAL: ${e.message}\n`);
+        log('FATAL', 'asset-mapping-mismatch', { error: e.message });
+        process.exit(1);
+    }
+
     restoreHistory();
+    restorePeakDeposit();
     log('INFO', 'agent-start', {
         network: ctx.net.key,
         address: ctx.wallet.address,
@@ -766,6 +842,8 @@ async function main() {
         logPath: LOG_PATH,
         historyPath: HISTORY_PATH,
         restoredHistoryCount: STATE.history.length,
+        peakDeposit: STATE.peakDeposit.toString(),
+        maxDepositDrawdownPct: MAX_DEPOSIT_DRAWDOWN_PCT,
     });
 
     let stopped = false;
