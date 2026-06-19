@@ -53,8 +53,9 @@ several) against this repo:
 ## Development
 
 ```sh
-forge install foundry-rs/forge-std --no-commit
-git submodule update --init --recursive
+# Vendored deps (lib/ is gitignored). Pinned to the versions CI builds against:
+git clone --depth 1 --branch v1.16.0 https://github.com/foundry-rs/forge-std lib/forge-std
+git clone --depth 1 --branch v0.1.26 https://github.com/Vectorized/solady   lib/solady
 
 forge build
 forge test
