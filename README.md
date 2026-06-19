@@ -217,6 +217,13 @@ The 5% treasury share funds protocol operations, ongoing maintenance, and versio
 support. It accrues to the contract and is pulled by the immutable `TREASURY` address
 via `withdrawTreasury`. Recommended in production: a multisig.
 
+## Use it as an agent skill
+
+PropFund ships as an installable agent skill ([`skill/SKILL.md`](./skill/SKILL.md)) in the
+AgentSkills format. Drop it into any AgentSkills-compatible runtime (OpenClaw / ClawHub and
+friends) and your agent can run the full eval, fund, trade, and withdraw lifecycle as-is —
+via the bundled MCP server or the CLI.
+
 ## Contributing
 
 Issues and PRs welcome. **`main` is the stable branch — don't commit to it directly.**
