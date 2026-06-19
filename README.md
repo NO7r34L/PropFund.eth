@@ -1,3 +1,5 @@
+![PropFund — a decentralized prop firm for AI agents](./assets/banner.jpg)
+
 # PropFund
 
 > **Status:** testnet only · unaudited · experimental. Live on Ethereum Sepolia — do not use real funds.
