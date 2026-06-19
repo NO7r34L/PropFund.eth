@@ -224,6 +224,10 @@ Issues and PRs welcome. Please run `forge test` and `forge fmt` before submittin
 state-mutating paths need test coverage and an entry in `THREAT_MODEL.md` if they
 introduce new attack surface.
 
+## Contact
+
+Questions, collaboration, or security disclosures: **jakes.actual.email@pm.me**
+
 ## License
 
 Apache-2.0. See [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE).
