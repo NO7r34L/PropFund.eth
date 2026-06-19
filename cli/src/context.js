@@ -57,6 +57,40 @@ export function buildContext({ requireSigner = false, network } = {}) {
     return { net, provider, wallet, propfund, usdc };
 }
 
+/**
+ * Verify networks.js asset ordering matches on-chain priceIds. Without this guard, an
+ * out-of-sync `pythPriceIds` array (e.g. after a deploy where the asset list was rotated)
+ * causes asset names to silently mis-resolve — "open LINK" actually opens SOL because
+ * `assetNames[2]` is LINK off-chain but `priceIds(2)` is SOL/USD on-chain. Harmless
+ * during eval (virtual balance), catastrophic in funded mode where it trades real USDC
+ * against the wrong feed. Read-only; cheap; call once at agent / write-path startup.
+ */
+export async function assertAssetMapping(propfund, net) {
+    if (!net.pythPriceIds || net.pythPriceIds.length === 0) {
+        return;  // local-network deploys may not have pinned IDs — skip
+    }
+    const onChainCount = Number(await propfund.assetCount());
+    const expected = net.pythPriceIds;
+    if (onChainCount !== expected.length) {
+        throw new Error(
+            `asset-mapping: on-chain assetCount=${onChainCount} but networks.js[${net.key}] ` +
+            `has ${expected.length} pythPriceIds. Update cli/src/networks.js to match the deploy.`
+        );
+    }
+    for (let i = 0; i < onChainCount; i++) {
+        const onChainId = (await propfund.priceIds(i)).toLowerCase();
+        const expectedId = expected[i].toLowerCase();
+        if (onChainId !== expectedId) {
+            throw new Error(
+                `asset-mapping mismatch at index ${i}: on-chain priceIds(${i}) = ${onChainId}, ` +
+                `networks.js[${net.key}].pythPriceIds[${i}] = ${expectedId} ` +
+                `(name "${net.assetNames?.[i]}"). Reorder cli/src/networks.js.assetNames + ` +
+                `pythPriceIds to match the deployed contract, then restart.`
+            );
+        }
+    }
+}
+
 // Resolve human-readable asset names ("eth", "btc") to the on-chain index. Falls back
 // to a numeric id if the user passes one directly.
 export function resolveAssetId(net, input) {
