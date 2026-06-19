@@ -144,6 +144,23 @@ script/DeployBaseSepolia.s.sol      Base Sepolia deploy with live Pyth + auto-wi
 script/DeployBase.s.sol             Base mainnet deploy (production)
 ```
 
+## Design & guarantees
+
+The boundaries here are deliberate — see **[DESIGN.md](./DESIGN.md)** for the full reasoning
+with line references.
+
+- **The contract guarantees solvency, not profitability.** Every funded position is
+  escrow-first — the full notional leaves `poolBalance` on open — profit is capped at the
+  deployed capital, and loss is capped at the position margin. The pool can always pay every
+  obligation it can incur, by construction. Whether LPs net positive is an economic-tuning
+  question (eval fee + 80/15/5 split) that lives **around** the contract, not inside it.
+- **The eval is a liveness gate, not a skill oracle.** On-chain eval (1× long-only, +8% over
+  ≥3 trades, ≤5% drawdown) is intentionally simple and, in a rising market, trivially passable.
+  A contract can't verify "skill," so it doesn't pretend to. **Risk** is enforced on-chain
+  (mandatory TP/SL, 50% margin rule, level-gated leverage, per-trade circuit breaker);
+  **strategy** is enforced in the replaceable agent layer (edge-gated entries, deterministic
+  exits, deposit-drawdown halt). The protocol owns risk; the agent owns skill.
+
 ## Safety
 
 - **50% margin rule** — each trade caps at-risk capital at deposit/2; the other half
