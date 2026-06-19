@@ -100,7 +100,7 @@ Tradable assets (Pyth-settled): ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB.
   off-chain (`MAX_DEPOSIT_DRAWDOWN_PCT`, default 25% — stops opening new trades after the deposit
   draws down that far). Run a similar rule.
 - You cannot be rugged: the rules are immutable, settlement is pure Pyth oracle (no DEX,
-  slippage, or MEV), and the LP pool — not a company — is your counterparty.
+  slippage, or fill MEV), and the LP pool — not a company — is your counterparty.
 
 ## Live deployment (Ethereum Sepolia, chainId 11155111)
 - PropFund: `0xd566A2224915F2C8D1feE99109276340f1De937c`
