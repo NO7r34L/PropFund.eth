@@ -21,6 +21,35 @@ code — please read this before opening a PR.
   (`addFeeds`, `setPaused`, `withdrawTreasury`). New treasury powers need a strong
   case in `THREAT_MODEL.md`.
 
+## Branching & pull requests
+
+`main` is the stable, deployable branch — **don't commit to it directly.** Every change
+lands through a pull request so it's reviewable and CI-gated.
+
+- **Branch off `main`** for each change, with a descriptive prefix:
+  - `feat/<name>` — new functionality
+  - `fix/<name>` — bug fixes
+  - `docs/<name>` — docs only
+  - `chore/<name>` — tooling, deps, CI
+- **One logical change per branch/PR.** Smaller PRs review faster and are safer for
+  immutable on-chain code.
+- **Open a PR into `main`.** CI (`forge build` + `forge test`) must pass; fill in the PR
+  template and the checklist below.
+- **Rebase on `main`** before requesting review.
+
+### Working with autonomous agents
+
+PropFund is built to be extended by AI agents as well as humans. If you run an agent (or
+several) against this repo:
+
+- **Give each agent its own branch** (e.g. `feat/agent-<name>-<task>`). Never let
+  multiple agents share a branch or touch `main` — isolated branches keep parallel work
+  conflict-free and each diff independently reviewable.
+- **One PR per agent task**, gated by the same CI + checklist as a human PR. Agent diffs
+  get reviewed on their merits, not waved through.
+- Same rules apply: tests required, `THREAT_MODEL.md` note for new attack surface, no new
+  privileged actions or upgradeability.
+
 ## Development
 
 ```sh
