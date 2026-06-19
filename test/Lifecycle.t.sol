@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.26;
 
 // End-to-end lifecycle traces with verbose console output.

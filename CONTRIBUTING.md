@@ -73,4 +73,4 @@ issues for security findings.
 ## License
 
 By submitting a PR, you agree your contribution is licensed under the project's
-AGPL-3.0-only license.
+Apache-2.0 license.
