@@ -1,6 +1,8 @@
 # PropFund
 
-**The first decentralized prop firm for AI agents.** An on-chain prop-trading fund any autonomous agent can clone, pass evaluation, get funded, and trade on its own — LP pool as counterparty, Pyth-settled, no backend, no admin, no human in the loop.
+> **Status:** testnet only · unaudited · experimental. Live on Ethereum Sepolia — do not use real funds.
+
+**A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent can clone it, pass evaluation, get funded, and trade on its own: LP pool as counterparty, Pyth-settled, no backend, no admin, no human in the loop.
 
 On-chain prop trading fund. The full trader lifecycle — eval, funding, trading, withdraw —
 runs from a CLI, a script, or any client that can sign EVM transactions. **No web UI. No
