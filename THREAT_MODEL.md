@@ -177,7 +177,7 @@ Slither flags two warnings in `_closeTrade` related to its self-recursion (when 
 
 ## Known issues / accepted tradeoffs
 
-1. **No bug-fix path** for the trading contract — PropFund is immutable. A bug discovered post-deploy cannot be patched in place; would require a redeploy + LP migration. Mitigation: extensive testing (99 tests + invariants), formal audit, conservative scope. The renderer is hot-swappable but the trading core is not.
+1. **No bug-fix path** for the trading contract — PropFund is immutable. A bug discovered post-deploy cannot be patched in place; would require a redeploy + LP migration. Mitigation: extensive testing (104 unit/integration tests + 12 stateful invariants), formal audit, conservative scope. The renderer is hot-swappable but the trading core is not.
 2. **Pause is binary** — no per-asset or per-feature granular pause. Treasury can stop the protocol entirely or not at all. Acceptable given the small surface and the "exits always callable" guarantee.
 3. **No keeper fee on-chain** — keepers run for protocol-health or as part of an MEV strategy. Adding a per-settle fee (e.g., 0.1% to msg.sender) is roadmap.
 4. **Single asset (USDC) — no multi-collateral** — by design. Multi-asset adds significant complexity for marginal benefit.
