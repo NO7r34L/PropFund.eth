@@ -50,7 +50,7 @@ Enforcement is split by what each layer *can* guarantee:
   fair-partition notional cap (`:1011`), and level-gated leverage (`:999`); plus the per-trade
   circuit breaker in `_calcPnl`.
 - **Agent layer = strategy** (off-chain by nature): edge-gated entries, deterministic
-  take-profit / trailing / drawdown-safe-stop exits, and a deposit-drawdown halt
+  take-profit / trailing / drawdown-safe-stop / time-stop exits, and a deposit-drawdown halt
   (`MAX_DEPOSIT_DRAWDOWN_PCT`, default 25%) — see `cli/scripts/agent.js`.
 
 The protocol enforces *risk*; the agent enforces *strategy*. Skill lives off-chain because skill
