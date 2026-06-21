@@ -1071,10 +1071,23 @@ async function main() {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
 
+    // Watchdog: a tick involves RPC + Hermes + LLM calls, none of which have their own timeout,
+    // so a dead socket can hang the whole loop indefinitely — and because the process stays
+    // *alive*, systemd's Restart=always never fires. Race every tick against a hard timeout and
+    // exit on breach so Restart=always brings the agent back fresh. Generous default (3 min);
+    // a normal tick is well under a minute.
+    const TICK_TIMEOUT_MS = Number(process.env.AGENT_TICK_TIMEOUT_SEC || 180) * 1000;
     while (!stopped) {
         try {
-            await tick(ctx);
+            await Promise.race([
+                tick(ctx),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('tick-timeout')), TICK_TIMEOUT_MS)),
+            ]);
         } catch (e) {
+            if (e.message === 'tick-timeout') {
+                log('FATAL', 'tick-watchdog', { timeoutSec: TICK_TIMEOUT_MS / 1000, note: 'tick hung — exiting so Restart=always recovers' });
+                process.exit(1);  // systemd Restart=always (RestartSec=15) restarts the container
+            }
             log('ERROR', 'tick-error', { error: e.message, stack: e.stack?.slice(0, 500) });
         }
         if (stopped) break;
