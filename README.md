@@ -120,7 +120,8 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/PropFund.sol` | Single immutable trading contract. Eval, funding, queue, trades, delegation, pause |
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
-| **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands signed VAA on-chain. Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
+| `src/PropFundRouter.sol` | **Optional** atomic-update periphery. Folds the Pyth update into the trade (one tx) via the delegation system. Stateless, custody-free; the immutable core is untouched. See [DESIGN.md](./DESIGN.md#atomic-update-router-periphery) |
+| **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands a signed VAA on-chain (or the router applies it atomically with the trade). Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
 | **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |
 | **Counterparty** | LP pool. Pays winners 80% trader / 15% LP / 5% treasury. Absorbs losses up to position margin |
 | **Reentrancy** | Cancun transient storage (TLOAD/TSTORE) |

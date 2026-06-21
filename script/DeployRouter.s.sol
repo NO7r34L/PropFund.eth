@@ -15,6 +15,10 @@ import {Script, console} from "forge-std/Script.sol";
 import {PropFundRouter, IPropFundTrades} from "../src/PropFundRouter.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
 
+interface IPropFundPyth {
+    function PYTH() external view returns (address);
+}
+
 contract DeployRouterScript is Script {
     // Defaults: live Ethereum Sepolia deployment.
     address constant DEFAULT_PROPFUND = 0xd566A2224915F2C8D1feE99109276340f1De937c;
@@ -28,6 +32,12 @@ contract DeployRouterScript is Script {
         console.log("Deployer:", vm.addr(pk));
         console.log("PropFund:", propfund);
         console.log("Pyth:    ", pyth);
+
+        // Safety: a router is only valid if it updates the SAME oracle the contract reads from.
+        // This catches a wrong PROPFUND/PYTH for the chain (e.g. running with the Eth-Sepolia
+        // defaults on Base) — fail loudly at deploy instead of shipping a silently-broken router.
+        address fundPyth = IPropFundPyth(propfund).PYTH();
+        require(fundPyth == pyth, "DeployRouter: PYTH != PropFund.PYTH() (wrong PROPFUND/PYTH for this chain)");
 
         vm.startBroadcast(pk);
         PropFundRouter router = new PropFundRouter(IPyth(pyth), IPropFundTrades(propfund));
