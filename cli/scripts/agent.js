@@ -56,6 +56,7 @@ const EVAL_TP_PCT = Number(process.env.EVAL_TP_PCT || 3.0);                    /
 const EVAL_TRAIL_ARM_PCT = Number(process.env.EVAL_TRAIL_ARM_PCT || 1.2);      // arm the trail once up this much
 const EVAL_TRAIL_GIVEBACK_PCT = Number(process.env.EVAL_TRAIL_GIVEBACK_PCT || 0.6); // close if it gives back this from peak
 const EVAL_SL_PCT = Number(process.env.EVAL_SL_PCT || 2.0);                    // cut a loser at -this% (when drawdown-safe)
+const EVAL_TIME_STOP_BLOCKS = Number(process.env.EVAL_TIME_STOP_BLOCKS || 300); // close a stale, going-nowhere trade after this many blocks held (chain-dependent; ~1h on 12s Sepolia)
 const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
 
@@ -430,6 +431,19 @@ function evalExitDecision(state) {
         if (newVb > floor * 1.002) return `stop-loss ${r.toFixed(2)}% <= -${EVAL_SL_PCT}% (drawdown-safe)`;
         // Otherwise cutting now would FAIL the eval on drawdown — hold; the price recovering back
         // above the floor (or to profit) will trigger the trailing/take-profit branch instead.
+    }
+
+    // 4. Time-stop — a trade stuck in the dead zone (never armed a win, never hit the stop) ties
+    // up the single position slot for the whole eval window. After EVAL_TIME_STOP_BLOCKS held with
+    // no meaningful progress, close it (when drawdown-safe) to free the slot and re-enter on a
+    // fresh setup. Skips winners that have armed the trail (those are branch 2's job).
+    const heldBlocks = open.current_trade_blocks_elapsed ?? 0;
+    if (heldBlocks >= EVAL_TIME_STOP_BLOCKS && r < EVAL_TRAIL_ARM_PCT) {
+        const newVb = vb * (1 + r / 100);
+        const floor = hwm * (1 - EVAL_DRAWDOWN_FAIL_BPS / 10_000);
+        if (newVb > floor * 1.002) {
+            return `time-stop: held ${heldBlocks} >= ${EVAL_TIME_STOP_BLOCKS} blocks at ${r.toFixed(2)}% (no progress) — freeing slot`;
+        }
     }
     return null;
 }
@@ -961,7 +975,7 @@ async function main() {
         restoredHistoryCount: STATE.history.length,
         peakDeposit: STATE.peakDeposit.toString(),
         maxDepositDrawdownPct: MAX_DEPOSIT_DRAWDOWN_PCT,
-        evalExit: { tpPct: EVAL_TP_PCT, trailArmPct: EVAL_TRAIL_ARM_PCT, trailGivebackPct: EVAL_TRAIL_GIVEBACK_PCT, slPct: EVAL_SL_PCT },
+        evalExit: { tpPct: EVAL_TP_PCT, trailArmPct: EVAL_TRAIL_ARM_PCT, trailGivebackPct: EVAL_TRAIL_GIVEBACK_PCT, slPct: EVAL_SL_PCT, timeStopBlocks: EVAL_TIME_STOP_BLOCKS },
         fastCadenceSec: FAST_CADENCE_SEC,
     });
 
