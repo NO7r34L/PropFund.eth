@@ -148,6 +148,34 @@ Budget is enforced by the principal's USDC allowance to the contract; per-trade
 notional is bounded by the authorization. `_checkController` rejects expired or
 non-matching controllers.
 
+## Atomic-update router (periphery)
+
+`src/PropFundRouter.sol` is an **optional, redeployable** periphery that makes a
+price-sensitive entry/exit a single transaction: it applies the Pyth update **and** trades
+in one call, instead of a separate `pushPyth` followed by the trade.
+
+The immutable core couldn't absorb this — PropFund is at the EIP-170 ceiling (optimizer
+already at `runs = 1`), so folding `updateData` into its trade functions doesn't fit. The
+router gets the behavior **without touching PropFund's bytecode**, by composing the existing
+delegation system:
+
+- A trader authorizes the router once via `setController(router, cap, expiry)`.
+- The trader calls `router.openTrade(updateData, ...)` (etc.). The router does
+  `PYTH.updatePriceFeeds{value: fee}(updateData)` then `FUND.openTradeFor(msg.sender, ...)` —
+  one tx. Pass empty `updateData` to skip the update when the on-chain price is already fresh.
+
+**Where it points is fixed and verifiable.** The router's `FUND` and `PYTH` are `immutable`,
+set at construction, and exposed as public getters. The deployment is only valid when
+`router.PYTH() == FUND.PYTH()` — i.e. it updates the *same* oracle the contract reads from.
+This is checkable on-chain (and on the verified Etherscan source) and cannot change.
+
+**Custody-free by construction.** The router never holds a position, deposit, or balance:
+PropFund settles every value flow to the principal, and any unused `msg.value` is refunded to
+the caller in the same tx. Authorizing it grants only controller powers (drive trades, bounded
+by `maxNotionalPerTrade`) — never custody, since `withdrawProfit`/`resignFunding` stay
+principal-only. A malicious or buggy router can, at worst, drive a trade within the cap; it
+cannot move funds out. See [`THREAT_MODEL.md`](./THREAT_MODEL.md) §21.
+
 ## Keeper paths (public)
 
 Anyone can call:
