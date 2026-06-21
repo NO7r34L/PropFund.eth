@@ -57,19 +57,29 @@ contract DeployLocalScript is Script {
         vm.startBroadcast(DEPLOYER_KEY);
 
         MockUSDCLocal usdc = new MockUSDCLocal();
+        // Full 8-asset set in the agent's canonical order (ETH,BTC,SOL,AVAX,LINK,AAVE,DOGE,ARB)
+        // so the local deploy matches the agent's asset universe end-to-end.
+        bytes32 SOL_ID  = bytes32(uint256(4));
+        bytes32 AVAX_ID = bytes32(uint256(5));
+        bytes32 AAVE_ID = bytes32(uint256(6));
+        bytes32 DOGE_ID = bytes32(uint256(7));
+        bytes32 ARB_ID  = bytes32(uint256(8));
+
         MockPythLocal pyth = new MockPythLocal();
         pyth.setSpotE8(ETH_ID,  4000e8);
         pyth.setSpotE8(BTC_ID,  60000e8);
+        pyth.setSpotE8(SOL_ID,  150e8);
+        pyth.setSpotE8(AVAX_ID, 35e8);
         pyth.setSpotE8(LINK_ID, 15e8);
+        pyth.setSpotE8(AAVE_ID, 90e8);
+        pyth.setSpotE8(DOGE_ID, 12e6);   // 0.12
+        pyth.setSpotE8(ARB_ID,  80e6);   // 0.80
 
-        bytes32[] memory ids = new bytes32[](3);
-        ids[0] = ETH_ID;
-        ids[1] = BTC_ID;
-        ids[2] = LINK_ID;
-        uint256[] memory staleAfter = new uint256[](3);
-        staleAfter[0] = 1 hours;
-        staleAfter[1] = 1 hours;
-        staleAfter[2] = 1 hours;
+        bytes32[] memory ids = new bytes32[](8);
+        ids[0] = ETH_ID; ids[1] = BTC_ID; ids[2] = SOL_ID;  ids[3] = AVAX_ID;
+        ids[4] = LINK_ID; ids[5] = AAVE_ID; ids[6] = DOGE_ID; ids[7] = ARB_ID;
+        uint256[] memory staleAfter = new uint256[](8);
+        for (uint256 i = 0; i < 8; i++) staleAfter[i] = 1 hours;
 
         PropFund fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
