@@ -2,14 +2,16 @@
 
 Compiler: solc 0.8.26, EVM Cancun, optimizer on (1 run — needed for size after delegation refactor + Pausable + audit fixes).
 
-## 101 passed, 0 failed, 1 skipped (103 with fork RPC set)
+_Snapshot — CI runs the full suite (`forge build` + `forge test`) on every push and PR; the Actions tab is the live source of truth._
+
+## 104 passed, 0 failed, 1 skipped (106 with fork RPC set)
 
 ```
 $ forge test
-Ran 7 test suites: 101 tests passed, 0 failed, 1 skipped (102 total tests)
+Ran 8 test suites: 104 tests passed, 0 failed, 1 skipped (105 total tests)
 ```
 
-The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 103/103.
+The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 106/106.
 
 ## Suite breakdown
 
@@ -18,17 +20,19 @@ The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA
 | `PropFund.t.sol` | 66 | unit: LP, eval (single + multi-asset + cancel cooldown), long/short, partial close, **mandatory TP/SL**, liquidation, level-up, profit/loss, NFT minting, multi-asset trading, accounting, **Pyth conf-interval guard**, **emergency pause**, view stats, **leverage-tier gate** |
 | `Lifecycle.t.sol` | 2 | end-to-end traces with full state log (happy path + loss-at-trade-stage) |
 | `LifecycleFull.t.sol` | 1 | multi-trader full-protocol trace |
-| `Invariants.t.sol` | 12 | stateful fuzz; pool solvency, drawdown floor, deploy cap (`deployed ≤ deposit × 5`), eval state machine, queue invariants, cancel-cooldown bookkeeping, post-audit invariants. Handler now derives valid TP/SL from current Pyth spot and fuzzes `leverage` 1..10, so trade-flow paths are actually exercised |
-| `QueueAndExpiry.t.sol` | 11 | funding queue + fair pool partition + 14-day position max-duration |
+| `Invariants.t.sol` | 12 | stateful fuzz; pool solvency, drawdown floor, deploy cap (`deployed ≤ deposit × 5`), eval state machine, queue invariants, cancel-cooldown bookkeeping, post-audit invariants. Handler derives valid TP/SL from current Pyth spot, fuzzes `leverage` 1..10, and `degradeOracle` randomly forces wide-conf / stale feeds so the oracle guards are exercised under the campaign |
+| `QueueAndExpiry.t.sol` | 11 | funding queue (O(1) FIFO) + fair pool partition + 14-day position max-duration |
 | `Delegation.t.sol` | 9 | agent authorization, expiry, revoke, max-notional cap, no-fund-leakage to agent |
+| `Router.t.sol` | 3 | `PropFundRouter` atomic update+trade periphery: full lifecycle driven through the router, excess-value refund, auth-required revert |
 | `PythFork.t.sol` | 2 (skipped without RPC) | fork test against live Pyth on Base Sepolia: every listed feed at expo=−8, conf within reasonable bounds |
 
 ## Contract size
 
 ```
-PropFund    24,544 / 24,576  (32 bytes spare under EIP-170)
-EvalCert     2,551
-EvalCertRenderer  ~14,000
+PropFund          24,508 / 24,576  (68 bytes spare under EIP-170)
+EvalCert           2,551
+EvalCertRenderer   7,853
+PropFundRouter     1,996   (optional atomic-update periphery)
 ```
 
 ## Slither (latest run)
@@ -89,7 +93,7 @@ Added during the audit phase to lock in the fixes:
 - `test_OpenTrade_AllowsTrailingSlAboveEntry` — trailing-stop pattern
 - `test_Pause_BlocksDepositAndOpens` — Pausable
 - `test_Pause_AllowsExits` — Pausable doesn't trap users
-- `test_Pause_OnlyDev` — auth
+- `test_Pause_OnlyTreasury` — auth
 - `test_Pause_UnpauseRestoresFlow` — toggle
 - `test_EvalPass_MixedAssets` — multi-asset eval (BTC + ETH + BTC compounding)
 - `test_EvalRejectsInvalidAsset` — assetId out of range
