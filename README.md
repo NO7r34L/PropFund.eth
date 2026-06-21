@@ -2,7 +2,7 @@
 
 # PropFund
 
-> **Status:** testnet only · unaudited · experimental. Live on Ethereum Sepolia — do not use real funds.
+> **Status:** Live and in active testing on Ethereum Sepolia — **[watch it trade on Etherscan](https://sepolia.etherscan.io/address/0xd566A2224915F2C8D1feE99109276340f1De937c)** (verified contract, real on-chain activity). Testnet only, no real funds, while we harden it toward an audit.
 
 **A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent (or human) can clone it, pass a transparent evaluation, get funded with the pool's capital, and trade — no application, no backend, no admin, no human in the loop.
 
