@@ -596,12 +596,33 @@ async function askLLM(messages) {
     return { parsed, usage: json.usage };
 }
 
-// Fetch the latest signed Pyth price update for the configured asset IDs and push it
-// on-chain via PropFund's pushPyth(). Skipped silently on Chainlink-era networks (no pythPriceIds).
-async function refreshPythIfApplicable(propfund, network, json) {
+// Resolve the single asset index a price-sensitive action touches, so we push ONLY that feed
+// instead of all of them (each feed update is a costly Wormhole verification).
+function relevantAssetId(action, state, network) {
+    const names = network?.assetNames || [];
+    const fromArg = () => {
+        const a = action.args?.asset;
+        if (typeof a === 'number' && a >= 0 && a < names.length) return a;
+        if (typeof a === 'string') { const i = names.indexOf(a.toUpperCase()); if (i >= 0) return i; }
+        return 0; // matches the open* handlers' ETH default
+    };
+    switch (action.action) {
+        case 'OPEN_EVAL_TRADE':
+        case 'OPEN_TRADE':       return fromArg();
+        case 'CLOSE_EVAL_TRADE': return state?.eval?.asset_id ?? null;
+        case 'CLOSE_TRADE':      return state?.position?.asset_id ?? null;
+        default:                 return null;
+    }
+}
+
+// Fetch the latest signed Pyth price update and push it on-chain via PropFund's pushPyth().
+// `priceIds` (optional) restricts the push to a subset of feeds — pass the single feed the trade
+// reads to avoid paying for 8 verifications. Skipped on Chainlink-era networks (no pythPriceIds).
+async function refreshPythIfApplicable(propfund, network, json, priceIds) {
     if (!network.pythPriceIds || !network.hermesUrl) return null;
+    const ids = (priceIds && priceIds.length) ? priceIds : network.pythPriceIds;
     const url = `${network.hermesUrl}/v2/updates/price/latest?` +
-        network.pythPriceIds.map(id => `ids[]=${id.startsWith('0x') ? id : '0x' + id}`).join('&');
+        ids.map(id => `ids[]=${id.startsWith('0x') ? id : '0x' + id}`).join('&');
     const res = await fetch(url, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
     if (!res.ok) throw new Error(`Hermes ${res.status}: ${await res.text().then(t => t.slice(0, 200))}`);
     const body = await res.json();
@@ -647,23 +668,36 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
         'OPEN_TRADE', 'CLOSE_TRADE',
     ]);
     if (network.pythAddr && PRICE_SENSITIVE.has(action.action)) {
-        let pushed = null;
-        for (let attempt = 1; attempt <= 2 && !pushed; attempt++) {
-            try {
-                pushed = await refreshPythIfApplicable(propfund, network, false);
-                if (pushed) log('INFO', 'pyth-pushed', { attempt, ...pushed });
-            } catch (e) {
-                const decoded = decodeError(e);
-                log('ERROR', 'pyth-push-failed', {
-                    attempt,
-                    error: decoded.message,
-                    errorName: decoded.errorName,
-                    rawData: decoded.data,  // 4-byte selector for offline decoding
-                });
+        // Gas: spend only what entry/exit actually needs. (1) If this asset's on-chain price is
+        // already within its staleAfter window, skip the push entirely — the trade reads it
+        // directly and this action is a SINGLE tx. The agent's own PnL view uses that same
+        // on-chain price, so settlement stays consistent with its decision. (2) Otherwise push
+        // ONLY this asset's feed, not all of them.
+        const assetId = relevantAssetId(action, state, network);
+        const feedFresh = assetId != null && state?.assets?.[assetId]?.fresh === true;
+        if (!feedFresh) {
+            const feedIds = (assetId != null && network.pythPriceIds?.[assetId])
+                ? [network.pythPriceIds[assetId]] : null; // null -> push all (safe fallback)
+            let pushed = null;
+            for (let attempt = 1; attempt <= 2 && !pushed; attempt++) {
+                try {
+                    pushed = await refreshPythIfApplicable(propfund, network, false, feedIds);
+                    if (pushed) log('INFO', 'pyth-pushed', { attempt, feeds: feedIds ? feedIds.length : 'all', ...pushed });
+                } catch (e) {
+                    const decoded = decodeError(e);
+                    log('ERROR', 'pyth-push-failed', {
+                        attempt,
+                        error: decoded.message,
+                        errorName: decoded.errorName,
+                        rawData: decoded.data,  // 4-byte selector for offline decoding
+                    });
+                }
             }
-        }
-        if (!pushed) {
-            return { ok: false, action: action.action, error: 'pyth-push-failed (skipping trade — stale price would revert anyway)' };
+            if (!pushed) {
+                return { ok: false, action: action.action, error: 'pyth-push-failed (skipping trade — stale price would revert anyway)' };
+            }
+        } else {
+            log('INFO', 'pyth-skip-fresh', { asset: assetId });
         }
     }
 
