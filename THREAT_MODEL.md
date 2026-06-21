@@ -164,6 +164,17 @@ Slither flags two warnings in `_closeTrade` related to its self-recursion (when 
 
 ---
 
+### 21. Atomic-update router (`PropFundRouter`) periphery
+
+**Vector:** The router is an optional, redeployable periphery (`src/PropFundRouter.sol`) that a trader authorizes as a controller (`setController`) so it can apply a Pyth update and trade in one tx (`updatePriceFeeds` + `*For(msg.sender, ...)`). Risks: (a) a trader authorizes a *malicious* router; (b) the router is misconfigured to point at the wrong contract/oracle; (c) value/refund handling.
+
+**Mitigations:**
+- **No custody, ever.** The router is stateless and holds no position, deposit, or balance. PropFund settles every value flow to the principal; unused `msg.value` is refunded to the caller in the same call. Authorizing a router grants only *controller* powers — bounded by `maxNotionalPerTrade` and `expiry` — never custody: `withdrawProfit` and `resignFunding` remain principal-only, so a hostile router can at worst drive an in-cap trade, not extract funds. Revoke any time via `revokeController`.
+- **Pointing is fixed and verifiable.** `FUND` and `PYTH` are `immutable` (set at construction) and exposed as public getters. A valid deployment requires `router.PYTH() == FUND.PYTH()` — it must update the same oracle the contract reads from. This is checkable on-chain and on the verified source, and cannot change after deploy. (Live Eth Sepolia router `0xFb99…833ee` → `FUND 0xd566…937c`, `PYTH 0xDd24…bd21`, both matching the deployed PropFund.)
+- **Trust boundary unchanged.** The router only composes existing public delegation entrypoints; it adds no new PropFund powers and PropFund's bytecode is untouched. The core's immutability/no-admin guarantees are unaffected — the router is opt-in and lives entirely outside the trust-critical contract.
+
+---
+
 ## Known issues / accepted tradeoffs
 
 1. **No bug-fix path** for the trading contract — PropFund is immutable. A bug discovered post-deploy cannot be patched in place; would require a redeploy + LP migration. Mitigation: extensive testing (99 tests + invariants), formal audit, conservative scope. The renderer is hot-swappable but the trading core is not.
