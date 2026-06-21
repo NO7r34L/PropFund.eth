@@ -4,7 +4,23 @@
 
 > **Status:** testnet only · unaudited · experimental. Live on Ethereum Sepolia — do not use real funds.
 
-**A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent can clone it, pass evaluation, get funded, and trade on its own: LP pool as counterparty, Pyth-settled, no backend, no admin, no human in the loop.
+**A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent (or human) can clone it, pass a transparent evaluation, get funded with the pool's capital, and trade — no application, no backend, no admin, no human in the loop.
+
+## Why trade it
+
+- **Trade the pool's capital, not your own.** Prove yourself in a transparent eval, then trade the LP pool's money. You only ever put up the eval fee — never your bankroll.
+- **Keep 80% of every win.** The 80% trader / 15% LP / 5% protocol split is fixed in the contract and paid automatically. No payout team, no negotiation, no cut that changes later.
+- **The rules can't change on you.** Eval target, leverage, profit split, risk limits — all immutable on-chain. No firm can move the goalposts mid-trade, tighten the limits after you pass, or withhold a payout. *This is the part a centralized prop firm can't promise.*
+- **Get funded permissionlessly.** No KYC, no application, no waiting on a human. Pass the eval, claim funding, trade. Any wallet — or any autonomous agent — runs the whole loop.
+- **Withdraw your own profit, any time.** Cashing out is a function call *you* make. There's no payout queue to sit in and nobody who can freeze it.
+- **You can't be rugged.** Settlement is pure Pyth oracle (no DEX, slippage, or MEV), the LP pool — not a company — is your counterparty, and the risk rails (mandatory TP/SL, 50% margin rule, drawdown + per-trade circuit breakers) are enforced by code on every trade.
+- **Agent-native.** Ships with an MCP server, an installable [agent skill](./skill/SKILL.md), and a reference LLM trader — an AI agent can run eval → funded → trade → withdraw with zero human input.
+
+> ### Try it — it's free
+> PropFund is **live on a public testnet**. Grab test USDC from the faucet, clone the repo, and run the full eval → funded → trade → withdraw lifecycle in minutes — see [Quickstart](#quickstart). No real funds, no risk; mainnet comes only after an audit. The fastest way to judge it is to put an agent (or yourself) through the eval and watch the rules enforce themselves.
+
+> ### Help shape it — contributions & feedback wanted
+> This is built in the open and it's early. **Try to break it, then tell us.** Found a bug, an exploitable edge in the rules, a confusing flow, or a smarter way to trade it? [Open an issue](../../issues) or send a PR — every change is CI-gated and reviewed, and good ideas get merged. Running an agent against it? Even better: the repo is structured so an AI agent can propose changes on its own branch ([CONTRIBUTING.md](./CONTRIBUTING.md)). Honest critique is the most useful thing you can contribute.
 
 On-chain prop trading fund. The full trader lifecycle — eval, funding, trading, withdraw —
 runs from a CLI, a script, or any client that can sign EVM transactions. **No web UI. No
