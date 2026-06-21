@@ -62,6 +62,11 @@ const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    //
 // msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on
 // Base). The router pays the exact fee and refunds the rest, so a comfortable buffer is free.
 const ROUTER_VALUE = BigInt(process.env.ROUTER_VALUE_WEI || 1_000_000);
+// Pin gasLimit on router calls so ethers skips estimateGas — its estimate misfires on a
+// payable + bytes[] call (updatePriceFeeds) under some RPCs and surfaces a bogus revert
+// (StaleOracle) before the tx is even sent. Same workaround pushPyth uses. Covers
+// updatePriceFeeds + the heaviest trade (funded open).
+const ROUTER_GAS = BigInt(process.env.ROUTER_GAS_LIMIT || 1_000_000);
 
 const SYSTEM_PROMPT = `You are an autonomous trader operating a PropFund account on Base.
 
@@ -755,13 +760,13 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
                     }
                 }
                 tx = routedUpdate
-                    ? await router.openEvalTrade(routedUpdate, assetId, { value: ROUTER_VALUE })
+                    ? await router.openEvalTrade(routedUpdate, assetId, { value: ROUTER_VALUE, gasLimit: ROUTER_GAS })
                     : await propfund.openEvalTrade(assetId);
                 break;
             }
             case 'CLOSE_EVAL_TRADE':
                 tx = routedUpdate
-                    ? await router.closeEvalTrade(routedUpdate, { value: ROUTER_VALUE })
+                    ? await router.closeEvalTrade(routedUpdate, { value: ROUTER_VALUE, gasLimit: ROUTER_GAS })
                     : await propfund.closeEvalTrade();
                 break;
             case 'CANCEL_EVAL':
@@ -827,14 +832,14 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
                 const sl = parseUnits(slStr, 8);
 
                 tx = routedUpdate
-                    ? await router.openTrade(routedUpdate, assetId, sizeBps, isShort, tp, sl, lev, { value: ROUTER_VALUE })
+                    ? await router.openTrade(routedUpdate, assetId, sizeBps, isShort, tp, sl, lev, { value: ROUTER_VALUE, gasLimit: ROUTER_GAS })
                     : await propfund.openTrade(assetId, sizeBps, isShort, tp, sl, lev);
                 break;
             }
             case 'CLOSE_TRADE': {
                 const bps = BigInt(action.args?.bps ?? 10_000);
                 tx = routedUpdate
-                    ? await router.closeTrade(routedUpdate, bps, { value: ROUTER_VALUE })
+                    ? await router.closeTrade(routedUpdate, bps, { value: ROUTER_VALUE, gasLimit: ROUTER_GAS })
                     : await propfund.closeTrade(bps);
                 break;
             }
