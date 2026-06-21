@@ -59,6 +59,9 @@ const EVAL_SL_PCT = Number(process.env.EVAL_SL_PCT || 2.0);                    /
 const EVAL_TIME_STOP_BLOCKS = Number(process.env.EVAL_TIME_STOP_BLOCKS || 300); // close a stale, going-nowhere trade after this many blocks held (chain-dependent; ~1h on 12s Sepolia)
 const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
+// msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on
+// Base). The router pays the exact fee and refunds the rest, so a comfortable buffer is free.
+const ROUTER_VALUE = BigInt(process.env.ROUTER_VALUE_WEI || 1_000_000);
 
 const SYSTEM_PROMPT = `You are an autonomous trader operating a PropFund account on Base.
 
@@ -615,10 +618,9 @@ function relevantAssetId(action, state, network) {
     }
 }
 
-// Fetch the latest signed Pyth price update and push it on-chain via PropFund's pushPyth().
-// `priceIds` (optional) restricts the push to a subset of feeds — pass the single feed the trade
-// reads to avoid paying for 8 verifications. Skipped on Chainlink-era networks (no pythPriceIds).
-async function refreshPythIfApplicable(propfund, network, json, priceIds) {
+// Fetch the latest signed Pyth update VAA(s) from Hermes for `priceIds` (or all configured feeds).
+// Returns the bytes[] update array (['0x...']) the router/pushPyth consume, or null off-Pyth.
+async function fetchPythUpdate(network, priceIds) {
     if (!network.pythPriceIds || !network.hermesUrl) return null;
     const ids = (priceIds && priceIds.length) ? priceIds : network.pythPriceIds;
     const url = `${network.hermesUrl}/v2/updates/price/latest?` +
@@ -628,7 +630,14 @@ async function refreshPythIfApplicable(propfund, network, json, priceIds) {
     const body = await res.json();
     const hex = body.binary?.data;
     if (!hex || !Array.isArray(hex)) throw new Error(`Hermes returned no data: ${JSON.stringify(body).slice(0, 200)}`);
-    const updateData = hex.map(d => '0x' + d);
+    return hex.map(d => '0x' + d);
+}
+
+// Push a fresh Pyth update on-chain via PropFund's standalone pushPyth() — the legacy (separate-tx)
+// path, used only when no router is configured. `priceIds` restricts the push to one feed.
+async function refreshPythIfApplicable(propfund, network, json, priceIds) {
+    const updateData = await fetchPythUpdate(network, priceIds);
+    if (!updateData) return null;
     // Pyth charges per-feed (~10 wei each on Base). Send 100000 wei — rounding error in USD.
     // Pin gasLimit so ethers doesn't estimate; estimateGas is buggy when payable + bytes[] reverts
     // bubble up under some L2 RPCs. Direct send works fine.
@@ -637,7 +646,7 @@ async function refreshPythIfApplicable(propfund, network, json, priceIds) {
     return { txHash: tx.hash, blockNumber: receipt.blockNumber };
 }
 
-async function executeAction(action, propfund, usdc, wallet, state, network) {
+async function executeAction(action, propfund, usdc, wallet, state, network, router) {
     const now = Math.floor(Date.now() / 1000);
 
     // Whitelist gate: reject any action not legal in current state. Saves gas, surfaces LLM
@@ -667,17 +676,32 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
         'OPEN_EVAL_TRADE', 'CLOSE_EVAL_TRADE',
         'OPEN_TRADE', 'CLOSE_TRADE',
     ]);
+    // When set, route this action's trade through the router with these signed updates so the
+    // price update + trade land in a SINGLE tx. Left null -> the price is fresh (direct trade) or
+    // there's no router (legacy separate-push path below).
+    let routedUpdate = null;
     if (network.pythAddr && PRICE_SENSITIVE.has(action.action)) {
-        // Gas: spend only what entry/exit actually needs. (1) If this asset's on-chain price is
-        // already within its staleAfter window, skip the push entirely — the trade reads it
-        // directly and this action is a SINGLE tx. The agent's own PnL view uses that same
-        // on-chain price, so settlement stays consistent with its decision. (2) Otherwise push
-        // ONLY this asset's feed, not all of them.
+        // Gas: spend only what entry/exit needs. If the asset's on-chain price is already within
+        // its staleAfter window, skip the update entirely — the trade reads it directly (single tx,
+        // consistent with the PnL view the decision used). If stale, refresh ONLY this asset's feed.
         const assetId = relevantAssetId(action, state, network);
         const feedFresh = assetId != null && state?.assets?.[assetId]?.fresh === true;
-        if (!feedFresh) {
-            const feedIds = (assetId != null && network.pythPriceIds?.[assetId])
-                ? [network.pythPriceIds[assetId]] : null; // null -> push all (safe fallback)
+        const feedIds = (assetId != null && network.pythPriceIds?.[assetId])
+            ? [network.pythPriceIds[assetId]] : null; // null -> all feeds (safe fallback)
+        if (feedFresh) {
+            log('INFO', 'pyth-skip-fresh', { asset: assetId });
+        } else if (router) {
+            // Atomic path: fetch the signed update and hand it to the router, which applies it and
+            // trades in one tx. No separate pushPyth. (Fetch only here; the tx fires in the switch.)
+            try {
+                routedUpdate = await fetchPythUpdate(network, feedIds);
+            } catch (e) {
+                const decoded = decodeError(e);
+                log('ERROR', 'pyth-fetch-failed', { error: decoded.message });
+                return { ok: false, action: action.action, error: 'pyth-fetch-failed (skipping trade — stale price would revert anyway)' };
+            }
+        } else {
+            // Legacy: no router configured — push the single feed in a separate tx, then trade.
             let pushed = null;
             for (let attempt = 1; attempt <= 2 && !pushed; attempt++) {
                 try {
@@ -685,19 +709,12 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
                     if (pushed) log('INFO', 'pyth-pushed', { attempt, feeds: feedIds ? feedIds.length : 'all', ...pushed });
                 } catch (e) {
                     const decoded = decodeError(e);
-                    log('ERROR', 'pyth-push-failed', {
-                        attempt,
-                        error: decoded.message,
-                        errorName: decoded.errorName,
-                        rawData: decoded.data,  // 4-byte selector for offline decoding
-                    });
+                    log('ERROR', 'pyth-push-failed', { attempt, error: decoded.message, errorName: decoded.errorName, rawData: decoded.data });
                 }
             }
             if (!pushed) {
                 return { ok: false, action: action.action, error: 'pyth-push-failed (skipping trade — stale price would revert anyway)' };
             }
-        } else {
-            log('INFO', 'pyth-skip-fresh', { asset: assetId });
         }
     }
 
@@ -737,11 +754,15 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
                         if (idx >= 0) assetId = idx;
                     }
                 }
-                tx = await propfund.openEvalTrade(assetId);
+                tx = routedUpdate
+                    ? await router.openEvalTrade(routedUpdate, assetId, { value: ROUTER_VALUE })
+                    : await propfund.openEvalTrade(assetId);
                 break;
             }
             case 'CLOSE_EVAL_TRADE':
-                tx = await propfund.closeEvalTrade();
+                tx = routedUpdate
+                    ? await router.closeEvalTrade(routedUpdate, { value: ROUTER_VALUE })
+                    : await propfund.closeEvalTrade();
                 break;
             case 'CANCEL_EVAL':
                 if (STATE.evalCancels >= MAX_EVAL_CANCELS) {
@@ -805,12 +826,16 @@ async function executeAction(action, propfund, usdc, wallet, state, network) {
                 const tp = parseUnits(tpStr, 8);
                 const sl = parseUnits(slStr, 8);
 
-                tx = await propfund.openTrade(assetId, sizeBps, isShort, tp, sl, lev);
+                tx = routedUpdate
+                    ? await router.openTrade(routedUpdate, assetId, sizeBps, isShort, tp, sl, lev, { value: ROUTER_VALUE })
+                    : await propfund.openTrade(assetId, sizeBps, isShort, tp, sl, lev);
                 break;
             }
             case 'CLOSE_TRADE': {
                 const bps = BigInt(action.args?.bps ?? 10_000);
-                tx = await propfund.closeTrade(bps);
+                tx = routedUpdate
+                    ? await router.closeTrade(routedUpdate, bps, { value: ROUTER_VALUE })
+                    : await propfund.closeTrade(bps);
                 break;
             }
             case 'UPDATE_EXIT': {
@@ -889,7 +914,7 @@ async function tick(ctx) {
 
         const exitReason = open?.current_trade_can_close ? evalExitDecision(state) : null;
         if (exitReason) {
-            const result = await executeAction({ action: 'CLOSE_EVAL_TRADE', reasoning: exitReason }, propfund, usdc, wallet, state, ctx.net);
+            const result = await executeAction({ action: 'CLOSE_EVAL_TRADE', reasoning: exitReason }, propfund, usdc, wallet, state, ctx.net, ctx.router);
             log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'eval-exit-ok' : 'eval-exit-failed', { reason: exitReason, ...result });
             if (result.ok) STATE.evalTradePeakR = null;
             pushHistory('CLOSE_EVAL_TRADE', null, result, exitReason);
@@ -963,7 +988,7 @@ async function tick(ctx) {
         llmResult.parsed.args = { ...(llmResult.parsed.args || {}), asset: forced };
     }
 
-    const result = await executeAction(llmResult.parsed, propfund, usdc, wallet, state, ctx.net);
+    const result = await executeAction(llmResult.parsed, propfund, usdc, wallet, state, ctx.net, ctx.router);
     log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'action-ok' : 'action-failed', result);
 
     pushHistory(llmResult.parsed.action, llmResult.parsed.args ?? null, result, llmResult.parsed.reasoning);
@@ -1012,6 +1037,34 @@ async function main() {
         evalExit: { tpPct: EVAL_TP_PCT, trailArmPct: EVAL_TRAIL_ARM_PCT, trailGivebackPct: EVAL_TRAIL_GIVEBACK_PCT, slPct: EVAL_SL_PCT, timeStopBlocks: EVAL_TIME_STOP_BLOCKS },
         fastCadenceSec: FAST_CADENCE_SEC,
     });
+
+    // One-time: authorize the atomic-update router as this trader's controller so it can drive the
+    // *For trade entrypoints on our behalf (update + trade in one tx). Idempotent. If it can't be
+    // confirmed, disable routing and fall back to the proven legacy separate-push path.
+    if (ctx.router) {
+        let authorized = false;
+        try {
+            const auth = await ctx.propfund.controllers(ctx.wallet.address);
+            const current = (auth.agent ?? auth[0] ?? '').toLowerCase();
+            if (current === ctx.net.routerAddr.toLowerCase()) {
+                authorized = true;
+                log('INFO', 'router-already-authorized', { router: ctx.net.routerAddr });
+            } else {
+                const cap = parseUnits('1000000', 6); // 1M USDC — far above any single-trade notional
+                const expiry = BigInt(Math.floor(Date.now() / 1000) + 10 * 365 * 24 * 3600);
+                const tx = await ctx.propfund.setController(ctx.net.routerAddr, cap, expiry);
+                await tx.wait();
+                authorized = true;
+                log('INFO', 'router-authorized', { router: ctx.net.routerAddr, txHash: tx.hash });
+            }
+        } catch (e) {
+            log('ERROR', 'router-authorize-failed', { error: e.message });
+        }
+        if (!authorized) {
+            ctx.router = null;
+            log('WARN', 'router-disabled', { reason: 'authorization unconfirmed — using legacy push path' });
+        }
+    }
 
     let stopped = false;
     const stop = () => { if (!stopped) { stopped = true; log('INFO', 'sigint', {}); } };

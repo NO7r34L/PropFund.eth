@@ -35,6 +35,8 @@ export const NETWORKS = {
         // — must mirror the on-chain priceIds[i] order or asset names will mis-resolve.
         contractAddr: '0xd566A2224915F2C8D1feE99109276340f1De937c',
         usdcAddr: '0x8FeCF5B81a60a9C66188aaa0430F7F56db877c56',
+        // Atomic update+trade periphery — folds the Pyth update into the trade (one tx).
+        routerAddr: '0xFb99D892fBeb87aae3e37eDBF331eAC7f6b833ee',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
         rpcUrl: 'https://rpc.sepolia.org',

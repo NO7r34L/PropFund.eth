@@ -16,6 +16,14 @@ const ERC20_ABI = [
     'function symbol() view returns (string)',
 ];
 
+// Atomic update+trade periphery (PropFundRouter). Wired only when net.routerAddr is set.
+const ROUTER_ABI = [
+    'function openEvalTrade(bytes[] updateData, uint8 assetId) payable',
+    'function closeEvalTrade(bytes[] updateData) payable',
+    'function openTrade(bytes[] updateData, uint8 assetId, uint256 sizeBps, bool isShort, uint64 tp, uint64 sl, uint8 leverage) payable',
+    'function closeTrade(bytes[] updateData, uint256 closeBps) payable',
+];
+
 // Signed actions need PROPFUND_KEY. Read-only commands work with just an RPC.
 export function buildContext({ requireSigner = false, network } = {}) {
     const net = resolveNetwork(network);
@@ -53,8 +61,9 @@ export function buildContext({ requireSigner = false, network } = {}) {
     const runner = signer ?? provider;
     const propfund = new Contract(getAddress(net.contractAddr), ABI, runner);
     const usdc = new Contract(getAddress(net.usdcAddr), ERC20_ABI, runner);
+    const router = net.routerAddr ? new Contract(getAddress(net.routerAddr), ROUTER_ABI, runner) : null;
 
-    return { net, provider, wallet, propfund, usdc };
+    return { net, provider, wallet, propfund, usdc, router };
 }
 
 /**
