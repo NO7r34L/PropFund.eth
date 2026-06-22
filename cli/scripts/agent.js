@@ -182,7 +182,22 @@ function log(level, event, data) {
     process.stdout.write(`${rec.ts} ${tag} ${data ? JSON.stringify(data) : ''}\n`);
 }
 
-async function readState(propfund, provider, usdc, wallet) {
+// Live market price for one feed from Hermes (no gas, no tx). The agent uses this for its
+// in-trade PnL so it tracks the real market — NOT the on-chain oracle, which on a sparsely-pushed
+// testnet can be frozen for hours, leaving the agent blind to price movement during a hold (every
+// trade then reads 0.00% and time-stops flat). Settlement still happens on-chain: the router
+// applies the same Hermes price at close, so the decision and the settlement stay consistent.
+async function fetchLiveSpot(network, priceId) {
+    if (!network?.hermesUrl || !priceId) return null;
+    const id = priceId.startsWith('0x') ? priceId : '0x' + priceId;
+    const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+    if (!res.ok) return null;
+    const p = (await res.json())?.parsed?.[0]?.price;
+    if (!p) return null;
+    return Number(p.price) * Math.pow(10, Number(p.expo));
+}
+
+async function readState(propfund, provider, usdc, wallet, network) {
     const me = wallet.address;
     const [ethBal, usdcBal, traderStats, evalStatus, assets, evalAccount, blockNumber] = await Promise.all([
         provider.getBalance(me),
@@ -218,10 +233,17 @@ async function readState(propfund, provider, usdc, wallet) {
     if (inVirtualTrade) {
         const entryE8 = evalAccount.entryPrice ?? 0n;
         const entry = Number(formatUnits(entryE8, 8));
-        const unrealizedPct = entry > 0 ? ((evalSpot - entry) / entry) * 100 : 0;
+        // Live market price (Hermes) — NOT the on-chain price, which can be frozen for hours on a
+        // sparsely-pushed testnet, blinding the agent to movement mid-trade. Falls back to on-chain.
+        let current = evalSpot;
+        try {
+            const live = await fetchLiveSpot(network, network?.pythPriceIds?.[evalAssetId]);
+            if (live && live > 0) current = live;
+        } catch { /* keep on-chain fallback */ }
+        const unrealizedPct = entry > 0 ? ((current - entry) / entry) * 100 : 0;
         openTradeBlock = {
             entry_price_usd: entry.toFixed(2),
-            current_price_usd: evalSpot.toFixed(2),
+            current_price_usd: current.toFixed(2),
             unrealized_return: `${unrealizedPct >= 0 ? '+' : ''}${unrealizedPct.toFixed(3)}%`,
             unrealized_return_value: unrealizedPct,  // numeric — used by hint logic, stripped from LLM output
             current_trade_blocks_elapsed: blocksSinceOpen,
@@ -886,7 +908,7 @@ function pushHistory(action, args, result, reasoning) {
 
 async function tick(ctx) {
     const { propfund, provider, usdc, wallet } = ctx;
-    const state = await readState(propfund, provider, usdc, wallet);
+    const state = await readState(propfund, provider, usdc, wallet, ctx.net);
 
     // Soft guardrail: skip the tick if ETH is too low to pay gas. Don't exit — when the
     // wallet is topped up the agent recovers automatically on the next cadence.
