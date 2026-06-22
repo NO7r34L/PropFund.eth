@@ -27,6 +27,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 import { buildContext, assertAssetMapping } from '../src/context.js';
 import { decodeError } from '../src/errors.js';
 import { resolveNetwork } from '../src/networks.js';
+import { runWithWatchdog } from '../src/watchdog.js';
 
 const MODEL = process.env.AGENT_MODEL;
 const LLM_BASE_URL = (process.env.LLM_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/+$/, '');
@@ -1106,12 +1107,9 @@ async function main() {
     const TICK_TIMEOUT_MS = Number(process.env.AGENT_TICK_TIMEOUT_SEC || 180) * 1000;
     while (!stopped) {
         try {
-            await Promise.race([
-                tick(ctx),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('tick-timeout')), TICK_TIMEOUT_MS)),
-            ]);
+            await runWithWatchdog(() => tick(ctx), TICK_TIMEOUT_MS);
         } catch (e) {
-            if (e.message === 'tick-timeout') {
+            if (e.message === 'watchdog-timeout') {
                 log('FATAL', 'tick-watchdog', { timeoutSec: TICK_TIMEOUT_MS / 1000, note: 'tick hung — exiting so Restart=always recovers' });
                 process.exit(1);  // systemd Restart=always (RestartSec=15) restarts the container
             }
