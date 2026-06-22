@@ -18,6 +18,7 @@ import { buildContext } from '../context.js';
 import { decodeError } from '../errors.js';
 import { emitJson, fmtUsdc } from '../format.js';
 import { isJson, flag } from '../args.js';
+import { runWithWatchdog } from '../watchdog.js';
 
 const MIN_BALANCE_WEI = 1_000_000_000_000_000n;  // 0.001 ETH — refuse to act below this
 
@@ -268,19 +269,27 @@ export async function keeperRun(args) {
         process.stdout.write(`[keeper] interval=${interval}s dry-run=${dryRun} max-gas-gwei=${maxGasGwei ?? 'none'}\n`);
     }
 
+    // Watchdog: a tick makes RPC + Hermes calls with no per-call timeout, so a dead socket can
+    // hang the loop forever while the process stays alive (Restart=always never fires). Cap each
+    // tick; on a hung tick, exit so Restart=always brings the keeper back fresh.
+    const tickTimeoutMs = Number(process.env.KEEPER_TICK_TIMEOUT_SEC || 180) * 1000;
     let cycle = 0;
     while (!stopped) {
         cycle++;
         try {
-            const summary = await tick({
+            const summary = await runWithWatchdog(() => tick({
                 propfund, provider, wallet, network: net,
                 dryRun,
                 maxGasGwei: maxGasGwei != null ? Number(maxGasGwei) : null,
                 json,
-            });
+            }), tickTimeoutMs);
             if (json) emitJson({ network: net.key, cycle, ...summary });
             else logTickSummary(net, summary);
         } catch (e) {
+            if (e.message === 'watchdog-timeout') {
+                process.stderr.write(`[keeper] FATAL: tick hung >${tickTimeoutMs / 1000}s — exiting so Restart=always recovers\n`);
+                process.exit(1);
+            }
             const decoded = decodeError(e);
             if (json) emitJson({ network: net.key, cycle, ok: false, error: decoded.message });
             else process.stderr.write(`[keeper] ERROR cycle ${cycle}: ${decoded.message}\n`);
