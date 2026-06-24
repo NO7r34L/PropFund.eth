@@ -1003,10 +1003,11 @@ contract PropFund {
         if (!f.active) revert NotFunded();
         if (positions[actor].active) revert TraderPositionOpen();
         if (sizeBps == 0 || sizeBps > 10_000) revert InvalidSize();
-        // Level gate: leverage tiers unlock as the trader crosses cumulative-PnL milestones
-        // (level 2 baseline, +$50 → 3, +$150 → 5, +$400 → 8, +$1000 → 10). lastLevel only
-        // ratchets up — once earned, the tier sticks even after a drawdown. lastLevel is
-        // clamped at MAX_LEVERAGE = 10 by _leverageLevel, so this also enforces the hard cap.
+        // Level gate (bidirectional): leverage is capped at the trader's current tier `lastLevel`.
+        // lastLevel ratchets UP as cumulative PnL crosses milestones (+$50 → 3, +$150 → 5, +$400 → 8,
+        // +$1000 → 10) AND resyncs DOWN to the live tier after a losing close (see _closeTrade) — so a
+        // trader who draws their cumPnl back below a threshold is demoted. _leverageLevel is clamped at
+        // MAX_LEVERAGE = 10, so this also enforces the hard cap.
         if (leverage == 0 || leverage > f.lastLevel) revert InvalidSize();
 
         // 50% margin rule: max margin per trade is half the deposit. The other half is always
@@ -1169,6 +1170,9 @@ contract PropFund {
             uint256 loss = uint256(-pnl);
             unchecked { rec.losses += 1; rec.totalLoss += loss; }
             _handleLoss(f, loss, deployedPortion, marginPortion);
+            // Bidirectional scaling: a loss can drop cumulative PnL below a tier threshold, so resync
+            // the leverage tier DOWN to the live level. (Profit ratchets it up in _handleProfit.)
+            f.lastLevel = uint8(_leverageLevel(f.cumulativePnl));
         } else {
             unchecked { poolBalance += deployedPortion; }
         }

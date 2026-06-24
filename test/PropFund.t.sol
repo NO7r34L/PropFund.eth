@@ -677,17 +677,27 @@ contract PropFundTest is Test {
         pyth.setSpotE8(ETH_ID, 1800e8);
         fund.liquidate(trader1);
 
+        // Bidirectional scaling: the liquidation loss drops cumPnl, so the trader is demoted to the
+        // baseline tier — but keeps funding.
+        (,,, uint8 levelAfter) = fund.funded(trader1);
+        assertEq(levelAfter, 2, "demoted to baseline tier after liquidation loss");
+
         // Re-claim should fail — they're still funded.
         vm.prank(trader1);
         vm.expectRevert(PropFund.AlreadyFunded.selector);
         fund.claimFunding();
 
-        // But they can open another trade with their remaining $50.
+        // They can keep trading with their remaining $50, but only at the demoted tier (leverage <= 2)...
         pyth.setSpotE8(ETH_ID, 4000e8);
-        vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 4);
+        vm.prank(trader1);
+        vm.expectRevert(PropFund.InvalidSize.selector);
+        fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 4); // leverage 4 now blocked post-demotion
+
+        // ...at leverage 2 it works.
+        vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 2);
         (uint256 deployed,,,,,, bool active,,) = fund.positions(trader1);
         assertTrue(active);
-        assertEq(deployed, 100e6); // (50/2) * 4 = 100
+        assertEq(deployed, 50e6); // (50/2) * 2 = 50
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1059,6 +1069,9 @@ contract PropFundTest is Test {
     /// from day 1. Real traders earn this by crossing cumulative-PnL milestones; the
     /// dedicated gate test (test_OpenTrade_LeverageGatedByLastLevel) verifies the real path.
     function _grantMaxLevel(address fundAddr, address trader) internal {
+        // Hot-patch funded[trader].lastLevel = MAX_LEVERAGE so tests can open high-leverage trades
+        // without grinding tier crossings first. FundedAccount layout: +3 = lastLevel.
+        // NOTE: after the first losing close, lastLevel resyncs down to the live cumPnl tier.
         bytes32 baseSlot = keccak256(abi.encode(trader, uint256(11))); // 11 = `funded` slot
         vm.store(fundAddr, bytes32(uint256(baseSlot) + 3), bytes32(uint256(10)));
     }
