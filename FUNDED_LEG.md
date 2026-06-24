@@ -222,10 +222,16 @@ mitigate with track-record minimums + the same drawdown stop on copy positions);
 5. **Eval fee** — add a configurable fee (default $1) collected on eval start; revenue to treasury/pool.
 6. Tests: bidirectional scaling, demotion on loss, promotion-gate enforcement, adapter open/close, fee accounting.
 
-> ⚠️ **EIP-170 budget is now critical: 24,570 / 24,576 — only 6 bytes spare** (the GUARDIAN split cost 62).
-> The remaining items (1–5) WILL overflow. Reclaim space first — likely by moving the funded-venue logic
-> into the `AvantisAdapter` / router (keeping `PropFund` thin) rather than inlining it. Budget this before
-> writing items 1–5.
+> ✅ **EIP-170 budget reclaimed: 22,767 / 24,576 — 1,809 bytes spare** (was 6). `getTraderStats` +
+> `getEvalStatus` moved into a new stateless `PropFundLens` (src/PropFundLens.sol), a pure view layer that
+> reads only PropFund public state. Architecture is now **core (`PropFund`) / views (`PropFundLens`) /
+> periphery (`PropFundRouter`)**. 104 tests pass. This buys comfortable room for items 1–5; if they still
+> tighten the budget, push funded-venue logic into the `AvantisAdapter`.
+>
+> **Deferred to redeploy (do NOT do early — the live bot still talks to the old contract):**
+> - Deploy scripts already deploy + log the lens.
+> - At redeploy: add `lensAddr` to `cli/src/networks.js`, repoint `getTraderStats`/`getEvalStatus` reads
+>   (stats.js, trade.js, funded.js, eval.js, agent.js) at the lens, and regenerate the lens ABI.
 
 ## 7. Open decisions
 - **Up/down rates** — keep the existing $50/$150/$400/$1000 PnL thresholds, or recalibrate for allocation scaling?
