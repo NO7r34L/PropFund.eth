@@ -215,7 +215,10 @@ mitigate with track-record minimums + the same drawdown stop on copy positions);
 0. ✅ **DONE — role split (`feat(contract): split GUARDIAN`).** `GUARDIAN` immutable owns `setPaused`;
    `TREASURY` keeps fees + `addFeeds` + cert owner. Deploy scripts take treasury/guardian via env. The
    keeper stays a roleless EOA. 104 tests pass; `test_Pause_OnlyGuardian` asserts even TREASURY can't pause.
-1. **Live-tier gate** — replace `leverage > f.lastLevel` check with `leverage > _leverageLevel(f.cumulativePnl)`; keep `lastLevel` for NFTs only.
+1. ✅ **DONE — bidirectional leverage scaling.** `lastLevel` now resyncs DOWN to the live cumPnl tier
+   after a losing close (was up-only ratchet); profit path still ratchets up + mints the NFT. Proven both
+   directions (ratchet-up + liquidation-demotion tests). 104 tests pass. *Known follow-up:* re-crossing a
+   tier after demotion re-mints a LEVEL_UP NFT — add a high-water mint guard in item 3.
 2. **Allocation scaling** — `_effectiveCap` / margin sizing scales with `tierMultiplier(cumulativePnl)`.
 3. **Promotion gate** — track trades-at-tier + drawdown-clean flag; require both for step-up; demote/terminate on breach.
 4. **`IFundedVenue` interface** + `AvantisAdapter` (Base) wired behind a feature flag; `PropFund` stays synthetic unless enabled.
