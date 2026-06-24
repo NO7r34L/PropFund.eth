@@ -84,7 +84,8 @@ contract DeploySepoliaScript is Script {
         PropFund fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             pyth: IPyth(PYTH),
-            treasury: deployer,
+            treasury: vm.envOr("TREASURY", deployer),
+            guardian: vm.envOr("GUARDIAN", deployer),
             evalFee: 10e6,
             fundedAllocation: 1_000e6,
             evalDuration: 216_000,      // 30 days at ~12s blocks on Ethereum Sepolia

@@ -59,7 +59,8 @@ contract DeployBaseScript is Script {
         PropFund fund = new PropFund(PropFund.Config({
             usdc: IERC20(USDC),
             pyth: IPyth(PYTH),
-            treasury: deployer,
+            treasury: vm.envOr("TREASURY", deployer),
+            guardian: vm.envOr("GUARDIAN", deployer),
             evalFee: 10e6,
             fundedAllocation: 1_000e6,
             evalDuration: 1_296_000,      // 30 days at 2s blocks on Base

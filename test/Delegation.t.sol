@@ -19,6 +19,7 @@ contract DelegationTest is Test {
 
     address lp = address(0x1111);
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
     address principal = address(0xA11CE);   // human / institution
     address agent     = address(0xA9E47);   // delegated controller's EOA
     address other     = address(0xBEEF);    // unrelated address — should be blocked
@@ -40,6 +41,7 @@ contract DelegationTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: ALLOCATION,
             evalDuration: EVAL_DURATION,

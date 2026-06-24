@@ -198,6 +198,7 @@ contract InvariantTest is Test {
     address[] actors;
 
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
     address lp1 = address(0x1111);
 
     function setUp() public {
@@ -216,6 +217,7 @@ contract InvariantTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: 10e6,
             fundedAllocation: 1_000e6,
             evalDuration: 50_400,

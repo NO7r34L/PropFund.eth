@@ -117,6 +117,8 @@ contract PropFund {
     // Access / lifecycle errors
     /// @notice Action restricted to the treasury address.
     error NotTreasury();
+    /// @notice Action restricted to the guardian address (emergency pause only).
+    error NotGuardian();
     /// @notice Reentrancy attempt detected (transient nonReentrant guard).
     error Reentrancy();
     /// @notice Action blocked while the contract is paused (audit Phase 3).
@@ -200,10 +202,15 @@ contract PropFund {
     /// @notice The settlement asset. All deposits, fees, payouts, and PnL are denominated in this token.
     IERC20 public immutable USDC;
     /// @notice Treasury address — receives the protocol fee (5% of trader profits) and is the
-    ///         only caller authorized for `addFeeds`, `setPaused`, and `withdrawTreasury`.
+    ///         caller authorized for `addFeeds` and `withdrawTreasury`. The money / governance key.
     ///         Funds operations, maintenance, and version support. Strongly recommended to be
-    ///         a multisig in production.
+    ///         a multisig (or DAO treasury) in production.
     address public immutable TREASURY;
+    /// @notice Guardian address — the emergency circuit-breaker, authorized for `setPaused` ONLY.
+    ///         Deliberately split from TREASURY so the key that can halt the protocol is not the key
+    ///         that holds fees. Recommended to be a separate (fast) ops multisig, distinct from
+    ///         TREASURY and from any operational keeper EOA.
+    address public immutable GUARDIAN;
     /// @notice Emergency stop. When true, blocks new evals, deposits, claims, and trade-opens.
     ///         Withdrawals, closes, cancels, and keeper sweeps remain callable so users can always exit.
     bool public paused;
@@ -306,11 +313,12 @@ contract PropFund {
     /// @notice Emitted whenever the pause flag flips.
     event PauseSet(bool paused);
 
-    /// @notice Emergency pause / unpause. Treasury-gated. Doesn't block exits — users can always
-    ///         withdraw, close trades, cancel evals, and run the keeper even while paused.
+    /// @notice Emergency pause / unpause. Guardian-gated (separate from the fee/treasury key).
+    ///         Doesn't block exits — users can always withdraw, close trades, cancel evals, and run
+    ///         the keeper even while paused.
     /// @param p True to pause, false to unpause.
     function setPaused(bool p) external {
-        if (msg.sender != TREASURY) revert NotTreasury();
+        if (msg.sender != GUARDIAN) revert NotGuardian();
         paused = p;
         emit PauseSet(p);
     }
@@ -537,7 +545,8 @@ contract PropFund {
     struct Config {
         IERC20 usdc;
         IPyth pyth;             // Pyth Network contract on the deployed chain.
-        address treasury;
+        address treasury;       // fee recipient + addFeeds + cert owner (money / governance key).
+        address guardian;       // emergency pause only — must differ from treasury in production.
         uint256 evalFee;
         uint256 fundedAllocation;
         uint256 evalDuration;
@@ -551,6 +560,7 @@ contract PropFund {
         if (address(c.usdc) == address(0)) revert ZeroAddress();
         if (address(c.pyth) == address(0)) revert ZeroAddress();
         if (c.treasury == address(0)) revert ZeroAddress();
+        if (c.guardian == address(0)) revert ZeroAddress();
         if (c.evalFee == 0 || c.fundedAllocation == 0) revert ZeroAmount();
         if (c.evalDuration == 0 || c.traderDeposit == 0 || c.maxFundedTraders == 0) revert ZeroAmount();
         if (c.priceIds.length == 0) revert ZeroAmount();
@@ -560,6 +570,7 @@ contract PropFund {
         USDC = c.usdc;
         PYTH = c.pyth;
         TREASURY = c.treasury;
+        GUARDIAN = c.guardian;
         EVAL_FEE = c.evalFee;
         FUNDED_ALLOCATION = c.fundedAllocation;
         EVAL_DURATION = c.evalDuration;

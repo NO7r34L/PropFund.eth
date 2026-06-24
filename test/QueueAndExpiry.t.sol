@@ -17,6 +17,7 @@ contract QueueAndExpiryTest is Test {
 
     address lp = address(0x1111);
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
     address trader1 = address(0xA11CE);
     address trader2 = address(0xB0B);
     address trader3 = address(0xCAFE);
@@ -40,6 +41,7 @@ contract QueueAndExpiryTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: ALLOCATION,
             evalDuration: EVAL_DURATION,
@@ -296,6 +298,7 @@ contract QueueAndExpiryTest is Test {
         f = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: ALLOCATION,
             evalDuration: EVAL_DURATION,

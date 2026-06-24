@@ -21,6 +21,7 @@ contract LifecycleTest is Test {
     address lp = address(0x1111);
     address trader = address(0xA11CE);
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -35,6 +36,7 @@ contract LifecycleTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: 10e6,
             fundedAllocation: 1_000e6,
             evalDuration: 50_400,
