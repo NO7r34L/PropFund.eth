@@ -7,7 +7,7 @@ on:
 
 jobs:
   forge:
-    name: forge build + fmt + test
+    name: forge build + test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -36,6 +36,40 @@ jobs:
           # Without it, that test auto-skips and the rest of the suite still runs.
           BASE_SEPOLIA_RPC: ${{ secrets.BASE_SEPOLIA_RPC }}
         run: forge test -vv
+
+  slither:
+    name: slither (static analysis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install dependencies
+        run: |
+          rm -rf lib/forge-std lib/solady
+          git clone --depth 1 --branch v1.16.0 https://github.com/foundry-rs/forge-std lib/forge-std
+          git clone --depth 1 --branch v0.1.26 https://github.com/Vectorized/solady lib/solady
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Slither
+        run: pip install slither-analyzer
+
+      # Gate on HIGH-severity findings. All current results are triaged false-positives /
+      # accepted-by-design (see TEST_RESULTS.md); the one HIGH FP is inline-disabled.
+      - name: Slither
+        run: slither . --fail-high
 
   cli:
     name: cli — node syntax + audit

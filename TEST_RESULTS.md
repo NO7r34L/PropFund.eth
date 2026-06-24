@@ -37,13 +37,17 @@ PropFundRouter     1,996   (optional atomic-update periphery)
 
 ## Slither (latest run)
 
-Findings remaining after audit fixes are all false positives or accepted-by-design:
+`slither .` → 16 contracts, 95 detectors, 59 results across **9 categories — every one a false
+positive or accepted-by-design** (triaged below per the Celo-style "triage every finding" gate):
 
 - `divide-before-multiply` on `notional = marginUsed × leverage` — intentional (notional is trading math; marginUsed is already integer USDC).
-- `incorrect-equality` on `totalShares == 0` — correct given the `DEAD_SHARES` sentinel.
+- `incorrect-equality` on `totalShares == 0` / `payout == 0` / `amount == 0` — correct given the `DEAD_SHARES` sentinel and explicit zero-guards.
 - `pyth-unchecked-confidence` — false positive; slither doesn't trace into `_tryReadSpot` to see the conf check.
-- `reentrancy-no-eth` — guarded by transient-storage `nonReentrant` on every external write path.
-- `unused-return` on `CERT.mint` — intentional (wrapped in `try/catch`).
+- `reentrancy-no-eth` in `_closeTrade` — guarded by transient-storage `nonReentrant` on every external write path. (The `maxLevelMinted` / `lastLevel`-resync writes added for bidirectional scaling sit inside this same guarded path.)
+- `arbitrary-send-eth` in `PropFundRouter._refund` — sends to `msg.sender` only (refunds the caller their own excess `msg.value`); not an arbitrary destination.
+- `encode-packed-collision` / `unused-return` / `uninitialized-local` in `EvalCertRenderer` — SVG/JSON buffer construction (DynamicBuffer pattern); strings are built via buffer ops, returns intentionally ignored. No security impact.
+- `uninitialized-local` on `PropFund.queuePosition().pos` — `0` is the intended "not in queue" sentinel default.
+- `missing-inheritance` — PropFund structurally satisfies the router's `IPropFundTrades` interface without formally inheriting it; informational, no behavioral effect.
 
 All 5 medium-severity audit findings (M-1 through M-5) and 4 of 4 low-severity findings have been resolved. See [`THREAT_MODEL.md`](./THREAT_MODEL.md).
 
