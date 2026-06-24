@@ -87,7 +87,7 @@ contract DeploySepoliaScript is Script {
             pyth: IPyth(PYTH),
             treasury: vm.envOr("TREASURY", deployer),
             guardian: vm.envOr("GUARDIAN", deployer),
-            evalFee: 10e6,
+            evalFee: vm.envOr("EVAL_FEE", uint256(1e6)), // $1 default (item 5); override via EVAL_FEE
             fundedAllocation: 1_000e6,
             evalDuration: 216_000,      // 30 days at ~12s blocks on Ethereum Sepolia
                                         // (Base uses 1_296_000 at 2s — EVAL_DURATION is block-based)

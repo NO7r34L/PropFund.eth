@@ -89,7 +89,7 @@ contract DeployLocalScript is Script {
             pyth: IPyth(address(pyth)),
             treasury: DEPLOYER,
             guardian: GUARDIAN_ADDR,
-            evalFee: 10e6,
+            evalFee: vm.envOr("EVAL_FEE", uint256(1e6)), // $1 default (item 5); override via EVAL_FEE
             fundedAllocation: 1_000e6,
             evalDuration: 50_400,
             traderDeposit: 100e6,
