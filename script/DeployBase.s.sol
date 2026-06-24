@@ -8,6 +8,7 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {PropFund} from "../src/PropFund.sol";
+import {PropFundLens} from "../src/PropFundLens.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
 
@@ -69,6 +70,7 @@ contract DeployBaseScript is Script {
             priceIds: ids,
             staleAfter: staleAfter
         }));
+        PropFundLens lens = new PropFundLens(address(fund));
 
         // NOTE: real USDC on Base mainnet — pool has to be seeded by an LP.
         // Deployer should approve + deposit separately, or run a follow-up `propfund lp deposit`.
@@ -78,6 +80,7 @@ contract DeployBaseScript is Script {
         console.log("");
         console.log("=== DEPLOYED TO BASE MAINNET ===");
         console.log("PropFund:", address(fund));
+        console.log("Lens:    ", address(lens));
         console.log("EvalCert:", address(fund.CERT()));
         console.log("Pyth:    ", PYTH);
         console.log("USDC:    ", USDC, "(native)");

@@ -7,6 +7,7 @@ pragma solidity 0.8.26;
 
 import {Test, console} from "forge-std/Test.sol";
 import {PropFund} from "../src/PropFund.sol";
+import {PropFundLens} from "../src/PropFundLens.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
@@ -14,6 +15,7 @@ import {MockPyth} from "./mocks/MockPyth.sol";
 
 contract LifecycleTest is Test {
     PropFund fund;
+    PropFundLens lens;
     MockUSDC usdc;
     MockPyth pyth;
     bytes32 constant ETH_ID = bytes32(uint256(1));
@@ -46,6 +48,7 @@ contract LifecycleTest is Test {
             priceIds: ids,
             staleAfter: staleAfter
         }));
+        lens = new PropFundLens(address(fund));
 
         usdc.mint(lp, 100_000e6);
         usdc.mint(trader, 1_000e6);
@@ -180,7 +183,7 @@ contract LifecycleTest is Test {
     function _logEvalState(string memory label) internal view {
         console.log("");
         console.log(label);
-        PropFund.EvalStatus memory s = fund.getEvalStatus(trader);
+        PropFundLens.EvalStatus memory s = lens.getEvalStatus(trader);
         console.log("  eval.active     :", s.active);
         console.log("  eval.passed     :", s.passed);
         console.log("  return (bps)    :", s.returnBps, "/", s.targetBps);

@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {PropFund} from "../src/PropFund.sol";
+import {PropFundLens} from "../src/PropFundLens.sol";
 import {EvalCert} from "../src/EvalCert.sol";
 import {EvalCertRenderer} from "../src/EvalCertRenderer.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
@@ -12,6 +13,7 @@ import {MockPyth} from "./mocks/MockPyth.sol";
 
 contract PropFundTest is Test {
     PropFund fund;
+    PropFundLens lens;
     MockUSDC usdc;
     MockPyth pyth;
     bytes32 constant ETH_ID = bytes32(uint256(1));
@@ -56,6 +58,7 @@ contract PropFundTest is Test {
             priceIds: ids,
             staleAfter: staleAfter
         }));
+        lens = new PropFundLens(address(fund));
 
         // Fund LPs
         usdc.mint(lp1, 100_000e6);
@@ -733,7 +736,7 @@ contract PropFundTest is Test {
 
     function test_LevelUp() public {
         _fundTrader(trader1);
-        assertEq(fund.getTraderStats(trader1).level, 2);
+        assertEq(lens.getTraderStats(trader1).level, 2);
 
         // Win enough to hit level 3 ($50+ cumPnl)
         for (uint256 i = 0; i < 10; i++) {
@@ -743,13 +746,13 @@ contract PropFundTest is Test {
             vm.prank(trader1); fund.closeTrade(10_000);
         }
 
-        assertGe(fund.getTraderStats(trader1).level, 3);
+        assertGe(lens.getTraderStats(trader1).level, 3);
     }
 
     function test_BuyingPowerReducedAfterLoss() public {
         _fundTrader(trader1);
 
-        uint256 startMaxDeploy = fund.getTraderStats(trader1).maxDeploy; // (100/2)*10 = 500
+        uint256 startMaxDeploy = lens.getTraderStats(trader1).maxDeploy; // (100/2)*10 = 500
 
         pyth.setSpotE8(ETH_ID, 4000e8);
         vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 4);
@@ -757,7 +760,7 @@ contract PropFundTest is Test {
         vm.prank(trader1); fund.closeTrade(10_000);
 
         // Deposit reduced from $100 to $90 by the $10 loss; max deploy scales with deposit.
-        uint256 maxDeploy = fund.getTraderStats(trader1).maxDeploy;
+        uint256 maxDeploy = lens.getTraderStats(trader1).maxDeploy;
         assertLt(maxDeploy, startMaxDeploy);
     }
 
@@ -984,7 +987,7 @@ contract PropFundTest is Test {
         vm.prank(trader1); fund.startEval();
         vm.prank(trader1); fund.openEvalTrade(0);
 
-        PropFund.EvalStatus memory s = fund.getEvalStatus(trader1);
+        PropFundLens.EvalStatus memory s = lens.getEvalStatus(trader1);
         assertTrue(s.active);
         assertTrue(s.inTrade);
         assertEq(s.tradeCount, 0);

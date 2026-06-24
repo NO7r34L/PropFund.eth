@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Script, console} from "forge-std/Script.sol";
 import {PropFund} from "../src/PropFund.sol";
+import {PropFundLens} from "../src/PropFundLens.sol";
 import {EvalCert} from "../src/EvalCert.sol";
 import {EvalCertRenderer} from "../src/EvalCertRenderer.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
@@ -101,6 +102,7 @@ contract DeployLocalScript is Script {
         EvalCertRenderer renderer = new EvalCertRenderer(address(fund));
         EvalCert cert = fund.CERT();
         cert.setRenderer(address(renderer));
+        PropFundLens lens = new PropFundLens(address(fund));
 
         // Seed LP pool so funded traders have allocation to draw on.
         usdc.mint(DEPLOYER, 1_000_000e6);
@@ -114,6 +116,7 @@ contract DeployLocalScript is Script {
         console.log("PROPFUND_USDC=",     address(usdc));
         console.log("PYTH=",              address(pyth));
         console.log("RENDERER=",          address(renderer));
+        console.log("LENS=",              address(lens));
         console.log("Pool seeded:",       fund.poolBalance());
     }
 }
