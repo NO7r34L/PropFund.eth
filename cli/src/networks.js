@@ -39,7 +39,8 @@ export const NETWORKS = {
         routerAddr: '0xFb99D892fBeb87aae3e37eDBF331eAC7f6b833ee',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
-        rpcUrl: 'https://rpc.sepolia.org',
+        // publicnode is more reliable than the flaky rpc.sepolia.org; matches the deployed bot's RPC.
+        rpcUrl: 'https://ethereum-sepolia-rpc.publicnode.com',
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
