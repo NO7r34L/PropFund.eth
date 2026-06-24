@@ -22,6 +22,7 @@ contract PropFundTest is Test {
     address trader1 = address(0xA11CE);
     address trader2 = address(0xB0B);
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
 
     uint256 constant EVAL_FEE = 10e6;
     uint256 constant ALLOCATION = 1_000e6;
@@ -45,6 +46,7 @@ contract PropFundTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: ALLOCATION,
             evalDuration: EVAL_DURATION,
@@ -227,9 +229,9 @@ contract PropFundTest is Test {
     }
 
     function test_Pause_BlocksDepositAndOpens() public {
-        // Audit Phase 3: treasury can pause to stop new evals/deposits/trades during incidents.
+        // Audit Phase 3: guardian can pause to stop new evals/deposits/trades during incidents.
         vm.prank(lp1); fund.deposit(50_000e6);
-        vm.prank(treasury); fund.setPaused(true);
+        vm.prank(guardian); fund.setPaused(true);
 
         vm.expectRevert(abi.encodeWithSignature("Paused()"));
         vm.prank(lp2); fund.deposit(10_000e6);
@@ -247,7 +249,7 @@ contract PropFundTest is Test {
         vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 4);
 
         // Now pause and verify exits still work.
-        vm.prank(treasury); fund.setPaused(true);
+        vm.prank(guardian); fund.setPaused(true);
 
         pyth.setSpotE8(ETH_ID, 3900e8);
         vm.prank(trader1); fund.closeTrade(10_000);  // exits must work even when paused
@@ -256,14 +258,21 @@ contract PropFundTest is Test {
         vm.prank(lp1); fund.withdraw(lpShares);       // LP exits must work
     }
 
-    function test_Pause_OnlyTreasury() public {
-        vm.expectRevert(abi.encodeWithSignature("NotTreasury()"));
+    function test_Pause_OnlyGuardian() public {
+        // Role split: pause is guardian-gated. A random EOA reverts...
+        vm.expectRevert(abi.encodeWithSignature("NotGuardian()"));
         vm.prank(trader1); fund.setPaused(true);
+        // ...and crucially, even the TREASURY (the fee/money key) cannot pause.
+        vm.expectRevert(abi.encodeWithSignature("NotGuardian()"));
+        vm.prank(treasury); fund.setPaused(true);
+        // Only the guardian can.
+        vm.prank(guardian); fund.setPaused(true);
+        assertTrue(fund.paused());
     }
 
     function test_Pause_UnpauseRestoresFlow() public {
-        vm.prank(treasury); fund.setPaused(true);
-        vm.prank(treasury); fund.setPaused(false);
+        vm.prank(guardian); fund.setPaused(true);
+        vm.prank(guardian); fund.setPaused(false);
         vm.prank(lp1); fund.deposit(50_000e6);  // succeeds after unpause
         assertGt(fund.shares(lp1), 0);
     }
@@ -1059,6 +1068,7 @@ contract PropFundTest is Test {
         PropFund f = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: ALLOCATION,
             evalDuration: EVAL_DURATION,

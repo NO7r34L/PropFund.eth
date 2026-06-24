@@ -22,6 +22,7 @@ contract RouterTest is Test {
 
     address lp = address(0x1111);
     address treasury = address(0xDE5);
+    address guardian = address(0xDEA);
     address trader = address(0xA11CE);
 
     uint256 constant EVAL_FEE = 10e6;
@@ -39,6 +40,7 @@ contract RouterTest is Test {
         fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
             treasury: treasury,
+            guardian: guardian,
             evalFee: EVAL_FEE,
             fundedAllocation: 1_000e6,
             evalDuration: 50_400,
