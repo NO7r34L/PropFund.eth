@@ -59,6 +59,9 @@ contract PropFundRouter {
     function _refund() internal {
         uint256 bal = address(this).balance;
         if (bal != 0) {
+            // Refund goes to msg.sender only (the caller's own excess Pyth fee) — not an arbitrary
+            // destination. Router holds no funds between txs, so there is nothing else to drain.
+            // slither-disable-next-line arbitrary-send-eth
             (bool ok, ) = msg.sender.call{value: bal}("");
             if (!ok) revert RefundFailed();
         }

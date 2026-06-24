@@ -50,6 +50,24 @@ Legend: ✅ done · 🔨 completable now (in this work) · 🔑 needs you (a dec
 - 🔨 README: keep the status banner accurate (network, contract address, "in testing")
 - 🔨 `DEPLOY.md` runbook + this `PRODUCTION.md`
 
+## 5b. Quality bar — benchmarked against Celo core-contracts
+Mapped to Celo's [smart-contract release process](https://docs.celo.org/contribute-to-celo/release-process/smart-contracts) + the OpenZeppelin Celo audit:
+
+| Celo practice | PropFund |
+| --- | --- |
+| Least-privilege role separation (not one key for everything) | ✅ guardian (pause) ≠ treasury (fees); keeper roleless |
+| Narrowly-scoped, documented pause/freeze | ✅ guardian-only pause; exits never blocked |
+| Reentrancy guard + checks-effects-interactions | ✅ transient `nonReentrant` + CEI on all write paths |
+| Bounded loop iterations | ✅ `processFundingQueue(max)`; invariant-fuzzed |
+| Invariant/fuzz tests for accounting | ✅ 12 invariants (`Invariants.t.sol`) |
+| **Static analysis gated in CI** | ✅ added `slither --fail-high` CI job; all findings triaged |
+| Unit test per change/bugfix | ✅ 105 tests; new behaviour gets a test (e.g. NFT re-mint guard) |
+| External audit before release | 🌐 gate (§7) |
+| Release branch → tagged candidate → verify deployed vs candidate | ◐ `DEPLOY.md` runbook + explorer verification |
+| Coverage as a signal (~95%) | ◐ broad coverage; not yet a hard gate |
+| Formatting gate (`forge fmt --check`) | ⊘ **not adopted** — repo uses an intentional compact style `forge fmt` would fight; formatting enforced by review |
+| Storage-layout/ABI compat checks | n/a upgradeability (non-upgradeable; redeploy) — ABI deltas tracked in `DEPLOY.md` |
+
 ## 6. Security & ops
 - 🔨 Slither + document
 - 🌐 **Professional audit** (required before any real funds)
