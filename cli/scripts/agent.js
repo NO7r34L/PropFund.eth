@@ -709,16 +709,15 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
     // there's no router (legacy separate-push path below).
     let routedUpdate = null;
     if (network.pythAddr && PRICE_SENSITIVE.has(action.action)) {
-        // Gas: spend only what entry/exit needs. If the asset's on-chain price is already within
-        // its staleAfter window, skip the update entirely — the trade reads it directly (single tx,
-        // consistent with the PnL view the decision used). If stale, refresh ONLY this asset's feed.
+        // ALWAYS refresh the price for a price-sensitive trade. PnL is virtualBalance *= closeSpot/entry
+        // (eval) / spot-vs-entry (funded), so entry AND exit must be real-time prices. A feed that is
+        // merely "fresh" per the contract's staleAfter window (up to 24h on testnet, where nobody pushes
+        // Pyth) is FROZEN — entry==exit -> 0 PnL every trade, and the eval can never move. The earlier
+        // "skip if within staleAfter" gas optimization silently broke compounding; correctness wins.
         const assetId = relevantAssetId(action, state, network);
-        const feedFresh = assetId != null && state?.assets?.[assetId]?.fresh === true;
         const feedIds = (assetId != null && network.pythPriceIds?.[assetId])
             ? [network.pythPriceIds[assetId]] : null; // null -> all feeds (safe fallback)
-        if (feedFresh) {
-            log('INFO', 'pyth-skip-fresh', { asset: assetId });
-        } else if (router) {
+        if (router) {
             // Atomic path: fetch the signed update and hand it to the router, which applies it and
             // trades in one tx. No separate pushPyth. (Fetch only here; the tx fires in the switch.)
             try {
