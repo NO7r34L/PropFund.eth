@@ -13,11 +13,11 @@ function resolvePrincipal(args) {
 }
 
 export async function evalStatus(args) {
-    const { net, propfund, wallet } = buildContext({ network: args.flags.network });
+    const { net, propfund, wallet, lens } = buildContext({ network: args.flags.network });
     const addr = args.flags.address || (wallet && wallet.address);
     if (!addr) throw new Error('pass --address or set PROPFUND_KEY');
 
-    const s = await propfund.getEvalStatus(addr);
+    const s = await lens.getEvalStatus(addr);
     const obj = {
         network: net.key,
         address: addr,

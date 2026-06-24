@@ -101,7 +101,15 @@ contract DeploySepoliaScript is Script {
         // Renderer reads PropFund stats to draw a per-trader procedural candlestick chart.
         EvalCertRenderer renderer = new EvalCertRenderer(address(fund));
         EvalCert cert = fund.CERT();
-        cert.setRenderer(address(renderer));
+        // Cert admin = TREASURY (so it can hot-swap the renderer). Only the deployer can wire it here
+        // when deployer IS the treasury; otherwise the treasury sets the renderer post-deploy.
+        if (vm.envOr("TREASURY", deployer) == deployer) {
+            cert.setRenderer(address(renderer));
+        } else {
+            console.log("NOTE: TREASURY != deployer; TREASURY must call setRenderer post-deploy:");
+            console.log("  cert", address(cert));
+            console.log("  renderer", address(renderer));
+        }
         PropFundLens lens = new PropFundLens(address(fund));
 
         // Seed pool so eval/funding flows work end-to-end

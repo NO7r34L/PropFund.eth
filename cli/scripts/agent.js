@@ -198,13 +198,13 @@ async function fetchLiveSpot(network, priceId) {
     return Number(p.price) * Math.pow(10, Number(p.expo));
 }
 
-async function readState(propfund, provider, usdc, wallet, network) {
+async function readState(propfund, provider, usdc, wallet, network, lens = propfund) {
     const me = wallet.address;
     const [ethBal, usdcBal, traderStats, evalStatus, assets, evalAccount, blockNumber] = await Promise.all([
         provider.getBalance(me),
         usdc.balanceOf(me),
-        propfund.getTraderStats(me),
-        propfund.getEvalStatus(me),
+        lens.getTraderStats(me),   // view layer (PropFundLens); falls back to propfund if no lens
+        lens.getEvalStatus(me),
         propfund.getAssets(),
         propfund.evals(me),
         provider.getBlockNumber(),
@@ -909,7 +909,7 @@ function pushHistory(action, args, result, reasoning) {
 
 async function tick(ctx) {
     const { propfund, provider, usdc, wallet } = ctx;
-    const state = await readState(propfund, provider, usdc, wallet, ctx.net);
+    const state = await readState(propfund, provider, usdc, wallet, ctx.net, ctx.lens);
 
     // Soft guardrail: skip the tick if ETH is too low to pay gas. Don't exit — when the
     // wallet is topped up the agent recovers automatically on the next cadence.

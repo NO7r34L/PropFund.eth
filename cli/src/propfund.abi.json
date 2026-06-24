@@ -23,6 +23,11 @@
             "internalType": "address"
           },
           {
+            "name": "guardian",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
             "name": "evalFee",
             "type": "uint256",
             "internalType": "uint256"
@@ -110,6 +115,19 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "GUARDIAN",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -597,178 +615,6 @@
   },
   {
     "type": "function",
-    "name": "getEvalStatus",
-    "inputs": [
-      {
-        "name": "trader",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "s",
-        "type": "tuple",
-        "internalType": "struct PropFund.EvalStatus",
-        "components": [
-          {
-            "name": "active",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "passed",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "returnBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "targetBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "drawdownBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxDrawdownBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "tradeCount",
-            "type": "uint16",
-            "internalType": "uint16"
-          },
-          {
-            "name": "tradesNeeded",
-            "type": "uint16",
-            "internalType": "uint16"
-          },
-          {
-            "name": "blocksLeft",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "inTrade",
-            "type": "bool",
-            "internalType": "bool"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getTraderStats",
-    "inputs": [
-      {
-        "name": "trader",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "s",
-        "type": "tuple",
-        "internalType": "struct PropFund.TraderStats",
-        "components": [
-          {
-            "name": "active",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "level",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deposit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "cumulativePnl",
-            "type": "int256",
-            "internalType": "int256"
-          },
-          {
-            "name": "maxDeploy",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "inPosition",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "isShort",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "assetId",
-            "type": "uint8",
-            "internalType": "uint8"
-          },
-          {
-            "name": "deployedAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "entryPrice",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "tpPrice",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "slPrice",
-            "type": "uint64",
-            "internalType": "uint64"
-          },
-          {
-            "name": "wins",
-            "type": "uint32",
-            "internalType": "uint32"
-          },
-          {
-            "name": "losses",
-            "type": "uint32",
-            "internalType": "uint32"
-          },
-          {
-            "name": "totalProfit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "totalLoss",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "isLiquidatable",
     "inputs": [
       {
@@ -805,6 +651,25 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "maxLevelMinted",
+    "inputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -2053,6 +1918,11 @@
   {
     "type": "error",
     "name": "NotFunded",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotGuardian",
     "inputs": []
   },
   {

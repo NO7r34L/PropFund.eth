@@ -3,11 +3,11 @@ import { emitJson, fmtPrice, fmtUsdc, printRows } from '../format.js';
 import { isJson } from '../args.js';
 
 export async function stats(args) {
-    const { net, propfund, wallet } = buildContext({ network: args.flags.network });
+    const { net, propfund, wallet, lens } = buildContext({ network: args.flags.network });
     const addr = args.flags.address || (wallet && wallet.address);
     if (!addr) throw new Error('pass --address or set PROPFUND_KEY');
 
-    const s = await propfund.getTraderStats(addr);
+    const s = await lens.getTraderStats(addr);
 
     const obj = {
         network: net.key,
