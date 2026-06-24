@@ -117,6 +117,57 @@ Scaling **up** requires rule adherence, not just a lucky PnL print. Enforced con
 4. Losses → `cumulativePnl` falls → tier + allocation step **down** automatically.
 5. Drawdown breach → demote / terminate.
 
+## 4.6 Unit economics (simulated — `analysis/funded_economics.py`)
+
+Monte Carlo of the funded-account lifecycle. The pool keeps `(1−split)` of winning trades but eats
+**100%** of losers, so for a zero-edge trader the pool is negative — the model only works if eval
+*selection* produces edge, amplified by scaling and a tiered split. Two structural rules are load-bearing:
+
+1. **Payout only on net new high-water profit** (losses must be recovered first). Paying per-winning-trade
+   leaks badly — it dropped break-even from a 30 bps/trade required edge to 20 bps just by fixing this.
+2. **Tiered split** — pool keeps more of unproven traders' early profit, less as they scale:
+   tier 2 → 50/50, tier 3 → 60/40, tier 5 → 70/30, tier 8 → 80/20, tier 10 → 85/15.
+   This drops the **break-even trader edge to ~9.3 bps/trade** — a realistic bar for a cohort that had to
+   clear a +8%/≤5%-drawdown eval.
+
+Pool EV per funded account (incl. $1 eval fee, 8% pass rate → $12.50 fee-buffer/account):
+
+| trader edge/trade | pool $/acct (trading) | + eval fee | ruin % |
+|---|---:|---:|---:|
+| 0.00% | −19.28 | −6.78 | 100% |
+| **+0.10%** | −11.66 | **+0.88** | 99.8% |
+| +0.20% | +4.99 | +17.49 | 97.5% |
+| +0.30% | +47.93 | +60.43 | 86.2% |
+
+- **Break-even ≈ +0.10%/trade edge.** Below it the pool bleeds (slowly, bounded); above it the pool compounds.
+- At +0.10%, the **$1 eval fee covers 107%** of the per-account trading loss — so near break-even the eval
+  fee is exactly the tipping factor. (At a *harder* eval / lower pass rate, the per-funded fee buffer grows.)
+- **Ruin ≈ 100%** is by design: the drawdown stop trails the high-water, so every account eventually
+  retraces and stops — but loss is bounded at `dd × allocation` and the pool has already banked its share.
+  *Open decision:* trailing-HWM stop (pool-favorable, every trader eventually stops) vs. a fixed floor
+  (winners survive indefinitely, better trader UX). See §7.
+
+### Capacity / waitlist (capital is the bottleneck, not eval throughput)
+Finite pool `K`; funded allocations must sum ≤ `K`; passed traders queue **FIFO** until capital frees
+(ruin / graduation / scale-down). Scaling a winner **up competes for the same capital** as funding the next
+queued passer — the queue arbitrates. PropFund already has this FIFO + fair-pool-partition
+(`QueueAndExpiry.t.sol`); this work makes scaling a first-class claimant on it.
+
+Simulated (K varied, demand = 1 passer/tick, blended eval-selected cohort):
+
+| pool K | utilization | avg wait | funded | queue@end | ROI |
+|---|---:|---:|---:|---:|---:|
+| $3,000 | 97% | 648 ticks | 293 | 1,697 | 992% |
+| $8,000 | 97% | 589 ticks | 750 | 1,248 | 449% |
+| $20,000 | 95% | 188 ticks | 1,521 | 434 | 265% |
+| $50,000 | 49% | ~0 ticks | 2,048 | 0 | 120% |
+
+**The waitlist trade-off:** scarce capital → near-100% utilization + sky-high ROI-on-capital, but long
+queues (bad trader UX — passers wait a long time). Abundant capital → no wait, lower capital efficiency.
+The pool operator sizes `K` (and a max-allocation ceiling) to balance trader experience against capital
+efficiency. Fast account turnover (the ~100% trailing-stop ruin) is what keeps capital recycling and waits
+short at moderate `K`.
+
 ## 5. Risk bounds
 - **Floor:** start tier 2, minimal base allocation — caps fluke-pass extraction.
 - **Ceiling:** hard max allocation per trader + global funded cap (`MAX_FUNDED_TRADERS`) — bounds pool risk.
@@ -136,10 +187,17 @@ Scaling **up** requires rule adherence, not just a lucky PnL print. Enforced con
 ## 7. Open decisions
 - **Up/down rates** — keep the existing $50/$150/$400/$1000 PnL thresholds, or recalibrate for allocation scaling?
 - **`baseAllocation`** starting size and **max allocation** ceiling.
-- **Profit split** (trader vs. pool) and whether integrator rebates go to pool or are shared.
+- **Profit split** — the model needs a *tiered* split (50→85% trader) to hit a realistic ~9 bps break-even.
+  Confirm the schedule; decide if integrator rebates go to pool or are shared.
+- **Drawdown stop type** — **trailing-from-high-water** (pool-favorable, ~100% eventual ruin, fast capital
+  recycle) vs. **fixed floor** (winners survive, better trader UX, slower recycle → longer waitlist). This is
+  the single biggest lever on both pool EV *and* the queue.
+- **Pool size `K` + max-allocation ceiling** — sets the utilization/wait trade-off (see §4.6 table).
 - **Eval fee token** — USDC $1, or ETH-equivalent? Refundable on pass (some firms refund the fee to passers)?
 - **Termination vs. demotion** on first drawdown breach — hard cut or one-tier demote with a strike system?
 - **Testnet-first** Avantis (Base Sepolia availability TBD) vs. straight to a capped mainnet pilot.
+
+> Economics are reproducible: `python3 analysis/funded_economics.py`. All parameters at the top of the file.
 
 ---
 *Eval stays virtual and custody-free. Funded capital flows only toward demonstrated, rule-abiding
