@@ -454,6 +454,11 @@ contract PropFund {
     /// @notice Lifetime stats per trader.
     mapping(address => TraderRecord) public records;
 
+    /// @notice Highest leverage tier a trader has EVER reached — gates LEVEL_UP NFT mints so a
+    ///         demote-then-re-promote (bidirectional `lastLevel`) doesn't re-mint a cert already earned.
+    ///         Monotonic; never decreases.
+    mapping(address => uint8) public maxLevelMinted;
+
     /// @notice Active funded traders. Length capped at MAX_FUNDED_TRADERS. Indexed via fundedTraderIdx.
     address[] public fundedTraders;
     /// @dev 1-indexed; 0 = not in fundedTraders. Used for O(1) removal during resign/revoke.
@@ -889,6 +894,9 @@ contract PropFund {
             deposit: TRADER_DEPOSIT,
             lastLevel: 2
         });
+        // Baseline NFT high-water = 2, matching lastLevel — so the first profit at the baseline tier
+        // doesn't mint a spurious "level-up to 2" cert. Only genuine ≥3 crossings mint.
+        if (maxLevelMinted[trader] < 2) maxLevelMinted[trader] = 2;
         fundedTraders.push(trader);
         fundedTraderIdx[trader] = fundedTraders.length;
     }
@@ -1204,8 +1212,12 @@ contract PropFund {
         unchecked { poolBalance += deployed - profit + lpCut; }
         emit ProfitCompounded(trader, traderCut, f.deposit);
         uint8 newLevel = uint8(_leverageLevel(f.cumulativePnl));
-        bool levelChanged = newLevel > f.lastLevel;
-        if (levelChanged) f.lastLevel = newLevel;
+        // Gate ratchet: lastLevel tracks the current tier (it resyncs down on losses in _closeTrade).
+        if (newLevel > f.lastLevel) f.lastLevel = newLevel;
+        // NFT gate: mint a LEVEL_UP cert only when reaching a NEW all-time-high tier, so a
+        // demote-then-re-promote doesn't re-mint a cert already earned.
+        bool levelChanged = newLevel > maxLevelMinted[trader];
+        if (levelChanged) maxLevelMinted[trader] = newLevel;
 
         // Accrue treasury fee — pulled by TREASURY via withdrawTreasury(). Keeps profitable
         // settlement from reverting if TREASURY gets USDC-blacklisted or otherwise rejects

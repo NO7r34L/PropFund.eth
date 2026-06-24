@@ -759,6 +759,39 @@ contract PropFundTest is Test {
         assertGe(lens.getTraderStats(trader1).level, 3);
     }
 
+    /// Item 3a: bidirectional lastLevel can demote then re-promote across a tier — the LEVEL_UP NFT
+    /// must mint only on the FIRST (all-time-high) crossing, never again on re-crossing.
+    function test_LevelUp_NoRemintAfterDemotion() public {
+        _passEval(trader1);
+        vm.prank(trader1); fund.claimFunding(); // baseline tier 2, no grant
+        EvalCert cert = fund.CERT();
+        uint256 certsBase = cert.balanceOf(trader1); // 1 EVAL_PASS cert
+        assertEq(fund.maxLevelMinted(trader1), 2, "baseline high-water = 2");
+
+        bytes32 baseSlot = keccak256(abi.encode(trader1, uint256(11)));
+
+        // Phase 1: cross into tier 3 on a profitable close → one LEVEL_UP mint.
+        pyth.setSpotE8(ETH_ID, 4000e8);
+        vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 2);
+        pyth.setSpotE8(ETH_ID, 6000e8); // +50% (circuit-breaker cap) → cumPnl past 50e6
+        vm.prank(trader1); fund.closeTrade(10_000);
+        assertEq(fund.maxLevelMinted(trader1), 3, "high-water advanced to 3");
+        uint256 certsTier3 = cert.balanceOf(trader1);
+        assertEq(certsTier3, certsBase + 1, "exactly one LEVEL_UP minted");
+
+        // Demote: force cumPnl + lastLevel back to baseline (a real loss does this; store keeps it crisp).
+        vm.store(address(fund), bytes32(uint256(baseSlot) + 1), bytes32(uint256(0))); // cumPnl -> 0
+        vm.store(address(fund), bytes32(uint256(baseSlot) + 3), bytes32(uint256(2))); // lastLevel -> 2
+
+        // Phase 2: re-cross tier 3 → NO new mint (high-water guard holds at 3).
+        pyth.setSpotE8(ETH_ID, 4000e8);
+        vm.prank(trader1); fund.openTrade(0, 10_000, false, 8000e8, 2000e8, 2);
+        pyth.setSpotE8(ETH_ID, 6000e8);
+        vm.prank(trader1); fund.closeTrade(10_000);
+        assertEq(fund.maxLevelMinted(trader1), 3, "high-water unchanged");
+        assertEq(cert.balanceOf(trader1), certsTier3, "no LEVEL_UP re-mint on re-crossing");
+    }
+
     function test_BuyingPowerReducedAfterLoss() public {
         _fundTrader(trader1);
 
