@@ -168,6 +168,41 @@ The pool operator sizes `K` (and a max-allocation ceiling) to balance trader exp
 efficiency. Fast account turnover (the ~100% trailing-stop ruin) is what keeps capital recycling and waits
 short at moderate `K`.
 
+## 4.7 Copy-trading layer — DAO + side capital (marketplace)
+
+Beyond the core pool's allocation, a **DAO treasury and external depositors can auto-copy proven funded
+traders with additional, independent capital.** This makes PropFund two-sided: traders bring skill; pool +
+DAO + copiers bring capital; proven signals get amplified instead of queued.
+
+**Why it fits the model:**
+- **Relieves the waitlist (§4.6).** Copy capital is opt-in and *separate from `K`*, so the best traders
+  absorb more capital without the core pool over-allocating or pushing new passers down the FIFO queue.
+- **Isolates risk.** Copiers bear their **own** losses on their **own** capital — the LP pool is never
+  liable for copier drawdowns. So the copy layer is pure fee + volume upside to the protocol, not new
+  pool risk.
+- **Tier-gated by the same engine.** Copy-eligibility requires a minimum tier / clean drawdown record —
+  the `cumulativePnl` track record that already gates allocation. Fluke passers can't attract side capital.
+
+**Mechanism.** When a copy-eligible trader's signal fires, the router opens the lead position *and* the
+copier positions **atomically in one tx** (same `IFundedVenue` adapter, proportional size) — so copiers
+get the same fill, no signal-leak slippage. The DAO sets per-trader copy caps, eligibility tier, and risk
+limits via governance.
+
+**Fee waterfall (per copy profit):** trader performance fee → protocol/DAO fee → LP/treasury → integrator
+rebate on the (now larger) volume. The trader earns *on top of* their pool split, sharpening the incentive
+to follow rules as their copied AUM grows. (Exact split = open decision, §7.)
+
+**New binding constraint — venue capacity, not pool `K`.** Copy capital amplifies position size on the perp
+venue, so the limit becomes the venue's **open-interest caps, per-position profit caps, and market impact**
+(Avantis caps max profit per position; both venues have OI limits and liquidity bounds). A trader with a
+$250 base alloc + $500k of copy capital is a very different position — the router must cap copied notional to
+venue limits and split across markets/venues if needed. This is the copy layer's analogue of the pool's `K`
+ceiling.
+
+**Risks specific to copy:** adverse selection (copiers pile into a hot trader right before mean-reversion —
+mitigate with track-record minimums + the same drawdown stop on copy positions); mirror-execution atomicity
+(must be one-tx or copiers eat slippage); venue concentration (cap exposure per trader/market/venue).
+
 ## 5. Risk bounds
 - **Floor:** start tier 2, minimal base allocation — caps fluke-pass extraction.
 - **Ceiling:** hard max allocation per trader + global funded cap (`MAX_FUNDED_TRADERS`) — bounds pool risk.
@@ -196,6 +231,8 @@ short at moderate `K`.
 - **Eval fee token** — USDC $1, or ETH-equivalent? Refundable on pass (some firms refund the fee to passers)?
 - **Termination vs. demotion** on first drawdown breach — hard cut or one-tier demote with a strike system?
 - **Testnet-first** Avantis (Base Sepolia availability TBD) vs. straight to a capped mainnet pilot.
+- **Copy layer (§4.7):** DAO scope/governance, copy-eligibility tier, per-trader copy cap, the copy fee
+  waterfall (trader / DAO / LP / integrator), and how copied notional is capped to venue OI/profit limits.
 
 > Economics are reproducible: `python3 analysis/funded_economics.py`. All parameters at the top of the file.
 
