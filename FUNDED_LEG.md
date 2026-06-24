@@ -212,12 +212,20 @@ mitigate with track-record minimums + the same drawdown stop on copy positions);
   exploit). Diversify venues over time; cap exposure per venue.
 
 ## 6. Contract changes (diff plan — for sign-off)
+0. ✅ **DONE — role split (`feat(contract): split GUARDIAN`).** `GUARDIAN` immutable owns `setPaused`;
+   `TREASURY` keeps fees + `addFeeds` + cert owner. Deploy scripts take treasury/guardian via env. The
+   keeper stays a roleless EOA. 104 tests pass; `test_Pause_OnlyGuardian` asserts even TREASURY can't pause.
 1. **Live-tier gate** — replace `leverage > f.lastLevel` check with `leverage > _leverageLevel(f.cumulativePnl)`; keep `lastLevel` for NFTs only.
 2. **Allocation scaling** — `_effectiveCap` / margin sizing scales with `tierMultiplier(cumulativePnl)`.
 3. **Promotion gate** — track trades-at-tier + drawdown-clean flag; require both for step-up; demote/terminate on breach.
 4. **`IFundedVenue` interface** + `AvantisAdapter` (Base) wired behind a feature flag; `PropFund` stays synthetic unless enabled.
 5. **Eval fee** — add a configurable fee (default $1) collected on eval start; revenue to treasury/pool.
-6. Tests: bidirectional scaling, demotion on loss, promotion-gate enforcement, adapter open/close, fee accounting. Recheck EIP-170 size budget (currently 68 bytes spare).
+6. Tests: bidirectional scaling, demotion on loss, promotion-gate enforcement, adapter open/close, fee accounting.
+
+> ⚠️ **EIP-170 budget is now critical: 24,570 / 24,576 — only 6 bytes spare** (the GUARDIAN split cost 62).
+> The remaining items (1–5) WILL overflow. Reclaim space first — likely by moving the funded-venue logic
+> into the `AvantisAdapter` / router (keeping `PropFund` thin) rather than inlining it. Budget this before
+> writing items 1–5.
 
 ## 7. Open decisions
 - **Up/down rates** — keep the existing $50/$150/$400/$1000 PnL thresholds, or recalibrate for allocation scaling?
@@ -233,6 +241,9 @@ mitigate with track-record minimums + the same drawdown stop on copy positions);
 - **Testnet-first** Avantis (Base Sepolia availability TBD) vs. straight to a capped mainnet pilot.
 - **Copy layer (§4.7):** DAO scope/governance, copy-eligibility tier, per-trader copy cap, the copy fee
   waterfall (trader / DAO / LP / integrator), and how copied notional is capped to venue OI/profit limits.
+- ~~**Treasury/admin role split**~~ ✅ done (§6.0) — `TREASURY` (fees) and `GUARDIAN` (pause) are now
+  separate immutables; production sets distinct addresses, keeper is roleless. Decide the actual production
+  addresses (DAO multisig for TREASURY, ops multisig for GUARDIAN) at redeploy.
 
 > Economics are reproducible: `python3 analysis/funded_economics.py`. All parameters at the top of the file.
 
