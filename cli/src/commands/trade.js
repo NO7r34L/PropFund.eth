@@ -9,7 +9,7 @@ import { waitTx } from './../tx.js';
 // The contract's openTrade takes sizeBps (fraction of *max margin*, where max margin = deposit / 2)
 // rather than a raw USDC amount. We accept a USDC-denominated --margin and convert it.
 export async function tradeOpen(args) {
-    const { net, propfund, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
+    const { net, propfund, wallet, lens } = buildContext({ requireSigner: true, network: args.flags.network });
     const principal = args.flags.for ? getAddress(args.flags.for) : null;
     const subject = principal ?? wallet.address;
 
@@ -23,7 +23,7 @@ export async function tradeOpen(args) {
         throw new Error('--leverage must be an integer 1..10');
     }
 
-    const stats = await propfund.getTraderStats(subject);
+    const stats = await lens.getTraderStats(subject);
     if (!stats.active) throw new Error(`${principal ? 'principal' : 'caller'} is not a funded trader`);
     if (stats.inPosition) throw new Error('already in a position — close it first');
 

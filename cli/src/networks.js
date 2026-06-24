@@ -33,10 +33,14 @@ export const NETWORKS = {
         // PropFund on Ethereum Sepolia. Fill `contractAddr` and `usdcAddr` after running
         // script/DeploySepolia.s.sol. Asset / Pyth-feed order matches that deploy script
         // — must mirror the on-chain priceIds[i] order or asset names will mis-resolve.
-        contractAddr: '0xd566A2224915F2C8D1feE99109276340f1De937c',
-        usdcAddr: '0x8FeCF5B81a60a9C66188aaa0430F7F56db877c56',
+        // Redeploy 2026-06-24: guardian/treasury role split + PropFundLens + $1 eval + bidirectional
+        // scaling. TREASURY 0x85B73B9515c6edFa9d08248103dd384901d2403a, GUARDIAN 0x3ccEC158226f85960f6ddc14d64f03E657aA8411.
+        contractAddr: '0x728d1739E494b7957B7b6A3Ba375006f58D296fc',
+        usdcAddr: '0x92157CBCdf65DdC2F457B92e459E13e3eb258e33',
         // Atomic update+trade periphery — folds the Pyth update into the trade (one tx).
-        routerAddr: '0xFb99D892fBeb87aae3e37eDBF331eAC7f6b833ee',
+        routerAddr: '0x028c4D472c0173aea7cC378E9823F62f13eB2f42',
+        // View layer — getTraderStats / getEvalStatus live here, not on the core contract.
+        lensAddr: '0x7C8dB37aAb2678Ca2FE648d41e583A2F9187a8AE',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
         // publicnode is more reliable than the flaky rpc.sepolia.org; matches the deployed bot's RPC.

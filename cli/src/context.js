@@ -6,6 +6,7 @@ import { resolveNetwork } from './networks.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ABI = JSON.parse(readFileSync(join(here, 'propfund.abi.json'), 'utf8'));
+const LENS_ABI = JSON.parse(readFileSync(join(here, 'propfundlens.abi.json'), 'utf8'));
 
 const ERC20_ABI = [
     'function balanceOf(address) view returns (uint256)',
@@ -62,8 +63,11 @@ export function buildContext({ requireSigner = false, network } = {}) {
     const propfund = new Contract(getAddress(net.contractAddr), ABI, runner);
     const usdc = new Contract(getAddress(net.usdcAddr), ERC20_ABI, runner);
     const router = net.routerAddr ? new Contract(getAddress(net.routerAddr), ROUTER_ABI, runner) : null;
+    // View layer: getTraderStats / getEvalStatus moved off the core contract into PropFundLens.
+    // Falls back to `propfund` for older deployments that still expose those getters directly.
+    const lens = net.lensAddr ? new Contract(getAddress(net.lensAddr), LENS_ABI, runner) : propfund;
 
-    return { net, provider, wallet, propfund, usdc, router };
+    return { net, provider, wallet, propfund, usdc, router, lens };
 }
 
 /**

@@ -8,10 +8,10 @@ import { waitTx } from '../tx.js';
 // (could be more than the original if profits compounded, less if losses absorbed).
 // With --for, agent resigns the principal's funded account; deposit returns to principal.
 export async function fundedResign(args) {
-    const { net, propfund, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
+    const { net, propfund, wallet, lens } = buildContext({ requireSigner: true, network: args.flags.network });
     const principal = args.flags.for ? getAddress(args.flags.for) : null;
     const subject = principal ?? wallet.address;
-    const before = await propfund.getTraderStats(subject);
+    const before = await lens.getTraderStats(subject);
     if (!before.active) throw new Error(`${principal ? 'principal' : 'caller'} is not a funded trader`);
 
     if (principal) {
