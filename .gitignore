@@ -16,6 +16,11 @@ package-lock.json.bak
 .env.*
 !.env.example
 
+# Internal-only docs — kept locally, never committed (removed from history)
+/DEPLOY.md
+/PRODUCTION.md
+/FUNDED_LEG.md
+
 # Editors / IDEs
 .vscode/
 .idea/
