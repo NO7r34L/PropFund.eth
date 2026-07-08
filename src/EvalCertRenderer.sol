@@ -172,6 +172,9 @@ contract EvalCertRenderer {
         int256 bot = openY > closeY ? openY : closeY;
         if (bot - top < 3) bot = top + 3;
         // Build the candle as one bytes blob, then push once. Keeps stack shallow.
+        // False positive: the packed bytes are concatenated SVG markup for display only —
+        // never hashed or used as a key, so cross-argument ambiguity is irrelevant.
+        // slither-disable-next-line encode-packed-collision
         bytes memory candle = abi.encodePacked(
             _wick(x, top - 5, top),
             _wick(x, bot, bot + 5),
