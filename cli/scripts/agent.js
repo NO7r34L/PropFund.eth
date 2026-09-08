@@ -197,7 +197,7 @@ function log(level, event, data) {
 async function fetchLiveSpot(network, priceId) {
     if (!network?.hermesUrl || !priceId) return null;
     const id = priceId.startsWith('0x') ? priceId : '0x' + priceId;
-    const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+    const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: hermesHeaders({ 'User-Agent': 'propfund-agent/0.1' }) });
     if (!res.ok) return null;
     const p = (await res.json())?.parsed?.[0]?.price;
     if (!p) return null;
@@ -246,7 +246,10 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
         try {
             const live = await fetchLiveSpot(network, network?.pythPriceIds?.[evalAssetId]);
             if (live && live > 0) current = live;
-        } catch { /* keep on-chain fallback */ }
+            else log('WARN', 'live-spot-unavailable', { assetId: evalAssetId, using: 'on-chain fallback' });
+        } catch (e) {
+            log('WARN', 'live-spot-failed', { assetId: evalAssetId, error: String(e.message || e).slice(0, 120) });
+        }
         const unrealizedPct = entry > 0 ? ((current - entry) / entry) * 100 : 0;
         openTradeBlock = {
             entry_price_usd: entry.toFixed(2),
