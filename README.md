@@ -2,7 +2,7 @@
 
 # PropFund
 
-> **Status:** Live and in active testing on Ethereum Sepolia — **[watch it trade on Etherscan](https://sepolia.etherscan.io/address/0x728d1739E494b7957B7b6A3Ba375006f58D296fc)** (source [verified on Sourcify](https://sourcify.dev/#/lookup/0x728d1739E494b7957B7b6A3Ba375006f58D296fc), real on-chain activity, separate treasury/guardian keys, $1 eval). Testnet only, no real funds, while we harden it toward an audit.
+> **Status:** Deployed and [source-verified](https://sourcify.dev/#/lookup/0x728d1739E494b7957B7b6A3Ba375006f58D296fc) on Ethereum Sepolia — **[contract on Etherscan](https://sepolia.etherscan.io/address/0x728d1739E494b7957B7b6A3Ba375006f58D296fc)** (separate treasury/guardian keys, $1 eval) — and **migrating to Base Sepolia** ([PR #30](https://github.com/NO7r34L/PropFund.eth/pull/30)): the contract's block-based timing constants were sized for Base's 2s blocks, and an oracle update there costs ~600× less gas. The Sepolia bot is paused for the move. Testnet only, no real funds, while we harden it toward an audit.
 
 **A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent (or human) can clone it, pass a transparent evaluation, get funded with the pool's capital, and trade — no application, no backend, no admin, no human in the loop.
 
