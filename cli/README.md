@@ -27,6 +27,8 @@ script runner.
 | `PROPFUND_NETWORK`| `basesepolia`    | always                |
 | `PROPFUND_RPC`    | network default  | optional override     |
 | `PROPFUND_KEY`    | —                | every write command   |
+| `PYTH_API_KEY`    | —                | keeper + agent (Hermes requires a key since 2026-08-26; get one at pythdata.app/signup) |
+| `PYTH_HERMES_URL` | `hermes.pyth.network` | optional; `https://pyth.dourolabs.app/hermes` for the upgraded endpoint |
 | `PROPFUND_DEBUG`  | —                | print stack traces on error |
 
 ## Read commands (no key needed)
@@ -227,6 +229,7 @@ Environment variables:
 | ---                | ---                                                          |
 | `LLM_BASE_URL`     | OpenAI-compatible `/v1` endpoint (default: OpenRouter)       |
 | `OPENROUTER_API_KEY` | required only when `LLM_BASE_URL` targets OpenRouter        |
+| `PYTH_API_KEY`     | required — every Hermes price fetch is authenticated          |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |
 | `AGENT_LOG`        | JSONL log path (default `/tmp/propfund-agent.log`)           |
