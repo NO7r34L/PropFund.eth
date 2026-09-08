@@ -125,9 +125,30 @@ export function resolveNetwork(name) {
         };
     }
 
+    // "baselocal" is an anvil fork of Base Sepolia (see DEVNET.md). It inherits the real Base
+    // Pyth wiring — contract address, price IDs, Hermes, 2s block time — because a fork carries
+    // the live Pyth deployment, and only the RPC and the freshly-deployed addresses differ.
+    // Everything the agent, keeper, and router exercise here is the same code path as public Base.
+    if (key === 'baselocal') {
+        const required = ['PROPFUND_CONTRACT', 'PROPFUND_USDC', 'PROPFUND_RPC'];
+        for (const v of required) {
+            if (!process.env[v]) throw new Error(`network "baselocal" needs ${required.join(', ')} env vars`);
+        }
+        return {
+            ...NETWORKS.basesepolia,
+            key: 'baselocal',
+            chainName: 'Base Sepolia (anvil fork)',
+            rpcUrl: process.env.PROPFUND_RPC,
+            contractAddr: process.env.PROPFUND_CONTRACT,
+            usdcAddr: process.env.PROPFUND_USDC,
+            lensAddr: process.env.PROPFUND_LENS || '',
+            routerAddr: process.env.PROPFUND_ROUTER || '',
+        };
+    }
+
     const net = NETWORKS[key];
     if (!net) {
-        const known = [...Object.keys(NETWORKS), 'local'].join(', ');
+        const known = [...Object.keys(NETWORKS), 'local', 'baselocal'].join(', ');
         throw new Error(`unknown network "${key}". known: ${known}`);
     }
     return { ...net, key };
