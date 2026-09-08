@@ -26,7 +26,7 @@ import { formatUnits, parseUnits, getAddress } from 'ethers';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { buildContext, assertAssetMapping } from '../src/context.js';
 import { decodeError } from '../src/errors.js';
-import { resolveNetwork } from '../src/networks.js';
+import { resolveNetwork, hermesHeaders } from '../src/networks.js';
 import { runWithWatchdog } from '../src/watchdog.js';
 
 const MODEL = process.env.AGENT_MODEL;
@@ -57,7 +57,13 @@ const EVAL_TP_PCT = Number(process.env.EVAL_TP_PCT || 3.0);                    /
 const EVAL_TRAIL_ARM_PCT = Number(process.env.EVAL_TRAIL_ARM_PCT || 1.2);      // arm the trail once up this much
 const EVAL_TRAIL_GIVEBACK_PCT = Number(process.env.EVAL_TRAIL_GIVEBACK_PCT || 0.6); // close if it gives back this from peak
 const EVAL_SL_PCT = Number(process.env.EVAL_SL_PCT || 2.0);                    // cut a loser at -this% (when drawdown-safe)
-const EVAL_TIME_STOP_BLOCKS = Number(process.env.EVAL_TIME_STOP_BLOCKS || 300); // close a stale, going-nowhere trade after this many blocks held (chain-dependent; ~1h on 12s Sepolia)
+// Close a stale, going-nowhere trade after this long. Expressed in wall-clock seconds and
+// converted to blocks via the network's blockTimeSec, so the same setting means the same
+// duration on 2s Base and 12s Ethereum blocks. EVAL_TIME_STOP_BLOCKS still overrides directly.
+const EVAL_TIME_STOP_SEC = Number(process.env.EVAL_TIME_STOP_SEC || 3600);
+const EVAL_TIME_STOP_BLOCKS = Number(
+    process.env.EVAL_TIME_STOP_BLOCKS || Math.round(EVAL_TIME_STOP_SEC / resolveNetwork().blockTimeSec)
+);
 const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
 // msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on
@@ -191,7 +197,7 @@ function log(level, event, data) {
 async function fetchLiveSpot(network, priceId) {
     if (!network?.hermesUrl || !priceId) return null;
     const id = priceId.startsWith('0x') ? priceId : '0x' + priceId;
-    const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+    const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: hermesHeaders({ 'User-Agent': 'propfund-agent/0.1' }) });
     if (!res.ok) return null;
     const p = (await res.json())?.parsed?.[0]?.price;
     if (!p) return null;
@@ -240,7 +246,10 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
         try {
             const live = await fetchLiveSpot(network, network?.pythPriceIds?.[evalAssetId]);
             if (live && live > 0) current = live;
-        } catch { /* keep on-chain fallback */ }
+            else log('WARN', 'live-spot-unavailable', { assetId: evalAssetId, using: 'on-chain fallback' });
+        } catch (e) {
+            log('WARN', 'live-spot-failed', { assetId: evalAssetId, error: String(e.message || e).slice(0, 120) });
+        }
         const unrealizedPct = entry > 0 ? ((current - entry) / entry) * 100 : 0;
         openTradeBlock = {
             entry_price_usd: entry.toFixed(2),
@@ -653,7 +662,7 @@ async function fetchPythUpdate(network, priceIds) {
     const ids = (priceIds && priceIds.length) ? priceIds : network.pythPriceIds;
     const url = `${network.hermesUrl}/v2/updates/price/latest?` +
         ids.map(id => `ids[]=${id.startsWith('0x') ? id : '0x' + id}`).join('&');
-    const res = await fetch(url, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+    const res = await fetch(url, { headers: hermesHeaders({ 'User-Agent': 'propfund-agent/0.1' }) });
     if (!res.ok) throw new Error(`Hermes ${res.status}: ${await res.text().then(t => t.slice(0, 200))}`);
     const body = await res.json();
     const hex = body.binary?.data;

@@ -12,6 +12,11 @@ export const NETWORKS = {
         chainId: 84532,
         chainName: 'Base Sepolia',
         rpcUrl: 'https://sepolia.base.org',
+        // Nominal block time. The contract's block-based windows (MIN_TRADE_BLOCKS,
+        // MAX_POSITION_BLOCKS, EVAL_DURATION) are all sized for 2s Base blocks; the agent
+        // derives its own block-based timings from this so they mean the same wall-clock
+        // duration on every network.
+        blockTimeSec: 2,
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
@@ -43,6 +48,9 @@ export const NETWORKS = {
         lensAddr: '0x7C8dB37aAb2678Ca2FE648d41e583A2F9187a8AE',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
+        // 12s blocks — 6x Base. Every block-based contract window stretches to match
+        // (MAX_POSITION_BLOCKS becomes ~84 days here, not the intended 14).
+        blockTimeSec: 12,
         // publicnode is more reliable than the flaky rpc.sepolia.org; matches the deployed bot's RPC.
         rpcUrl: 'https://ethereum-sepolia-rpc.publicnode.com',
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
@@ -70,6 +78,7 @@ export const NETWORKS = {
         chainId: 8453,
         chainName: 'Base',
         rpcUrl: 'https://mainnet.base.org',
+        blockTimeSec: 2,
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
@@ -88,6 +97,14 @@ export const NETWORKS = {
         hermesUrl: 'https://hermes.pyth.network',
     },
 };
+
+// Hermes has required authentication since the Pyth Core upgrade (2026-08-26 16:00 UTC).
+// Set PYTH_API_KEY. Unauthenticated calls return 401 on every route that serves signed
+// price updates. Returns `extra` unchanged when no key is set so local/mock setups still work.
+export function hermesHeaders(extra = {}) {
+    const key = process.env.PYTH_API_KEY;
+    return key ? { ...extra, Authorization: `Bearer ${key}` } : extra;
+}
 
 export function resolveNetwork(name) {
     const key = (name || process.env.PROPFUND_NETWORK || 'basesepolia').toLowerCase();
@@ -112,13 +129,38 @@ export function resolveNetwork(name) {
             usdcDecimals: 6,
             priceDecimals: 8,
             usdcMintable: true,
+            blockTimeSec: Number(process.env.PROPFUND_BLOCK_TIME_SEC || 2),
+        };
+    }
+
+    // "baselocal" is an anvil fork of Base Sepolia (see DEVNET.md). It inherits the real Base
+    // Pyth wiring — contract address, price IDs, Hermes, 2s block time — because a fork carries
+    // the live Pyth deployment, and only the RPC and the freshly-deployed addresses differ.
+    // Everything the agent, keeper, and router exercise here is the same code path as public Base.
+    if (key === 'baselocal') {
+        const required = ['PROPFUND_CONTRACT', 'PROPFUND_USDC', 'PROPFUND_RPC'];
+        for (const v of required) {
+            if (!process.env[v]) throw new Error(`network "baselocal" needs ${required.join(', ')} env vars`);
+        }
+        return {
+            ...NETWORKS.basesepolia,
+            key: 'baselocal',
+            chainName: 'Base Sepolia (anvil fork)',
+            rpcUrl: process.env.PROPFUND_RPC,
+            contractAddr: process.env.PROPFUND_CONTRACT,
+            usdcAddr: process.env.PROPFUND_USDC,
+            lensAddr: process.env.PROPFUND_LENS || '',
+            routerAddr: process.env.PROPFUND_ROUTER || '',
         };
     }
 
     const net = NETWORKS[key];
     if (!net) {
-        const known = [...Object.keys(NETWORKS), 'local'].join(', ');
+        const known = [...Object.keys(NETWORKS), 'local', 'baselocal'].join(', ');
         throw new Error(`unknown network "${key}". known: ${known}`);
     }
-    return { ...net, key };
+    // PYTH_HERMES_URL points at the upgraded endpoint (https://pyth.dourolabs.app/hermes) for
+    // the "early upgrade" path. The default keeps hermes.pyth.network, which the DAO upgraded
+    // in place — same routes and response shapes, but it still needs the API key.
+    return { ...net, key, hermesUrl: process.env.PYTH_HERMES_URL || net.hermesUrl };
 }

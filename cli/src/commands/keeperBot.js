@@ -19,6 +19,7 @@ import { decodeError } from '../errors.js';
 import { emitJson, fmtUsdc } from '../format.js';
 import { isJson, flag } from '../args.js';
 import { runWithWatchdog } from '../watchdog.js';
+import { hermesHeaders } from '../networks.js';
 
 const MIN_BALANCE_WEI = 1_000_000_000_000_000n;  // 0.001 ETH — refuse to act below this
 
@@ -28,7 +29,7 @@ async function refreshPyth(propfund, network) {
     if (!network.pythPriceIds || !network.hermesUrl) return null;
     const url = `${network.hermesUrl}/v2/updates/price/latest?` +
         network.pythPriceIds.map(id => `ids[]=${id.startsWith('0x') ? id : '0x' + id}`).join('&');
-    const res = await fetch(url, { headers: { 'User-Agent': 'propfund-keeper/0.1' } });
+    const res = await fetch(url, { headers: hermesHeaders({ 'User-Agent': 'propfund-keeper/0.1' }) });
     if (!res.ok) throw new Error(`Hermes ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const body = await res.json();
     const hex = body.binary?.data;
