@@ -57,7 +57,13 @@ const EVAL_TP_PCT = Number(process.env.EVAL_TP_PCT || 3.0);                    /
 const EVAL_TRAIL_ARM_PCT = Number(process.env.EVAL_TRAIL_ARM_PCT || 1.2);      // arm the trail once up this much
 const EVAL_TRAIL_GIVEBACK_PCT = Number(process.env.EVAL_TRAIL_GIVEBACK_PCT || 0.6); // close if it gives back this from peak
 const EVAL_SL_PCT = Number(process.env.EVAL_SL_PCT || 2.0);                    // cut a loser at -this% (when drawdown-safe)
-const EVAL_TIME_STOP_BLOCKS = Number(process.env.EVAL_TIME_STOP_BLOCKS || 300); // close a stale, going-nowhere trade after this many blocks held (chain-dependent; ~1h on 12s Sepolia)
+// Close a stale, going-nowhere trade after this long. Expressed in wall-clock seconds and
+// converted to blocks via the network's blockTimeSec, so the same setting means the same
+// duration on 2s Base and 12s Ethereum blocks. EVAL_TIME_STOP_BLOCKS still overrides directly.
+const EVAL_TIME_STOP_SEC = Number(process.env.EVAL_TIME_STOP_SEC || 3600);
+const EVAL_TIME_STOP_BLOCKS = Number(
+    process.env.EVAL_TIME_STOP_BLOCKS || Math.round(EVAL_TIME_STOP_SEC / resolveNetwork().blockTimeSec)
+);
 const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
 // msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on

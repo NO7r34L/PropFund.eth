@@ -12,6 +12,11 @@ export const NETWORKS = {
         chainId: 84532,
         chainName: 'Base Sepolia',
         rpcUrl: 'https://sepolia.base.org',
+        // Nominal block time. The contract's block-based windows (MIN_TRADE_BLOCKS,
+        // MAX_POSITION_BLOCKS, EVAL_DURATION) are all sized for 2s Base blocks; the agent
+        // derives its own block-based timings from this so they mean the same wall-clock
+        // duration on every network.
+        blockTimeSec: 2,
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
@@ -43,6 +48,9 @@ export const NETWORKS = {
         lensAddr: '0x7C8dB37aAb2678Ca2FE648d41e583A2F9187a8AE',
         chainId: 11155111,
         chainName: 'Ethereum Sepolia',
+        // 12s blocks — 6x Base. Every block-based contract window stretches to match
+        // (MAX_POSITION_BLOCKS becomes ~84 days here, not the intended 14).
+        blockTimeSec: 12,
         // publicnode is more reliable than the flaky rpc.sepolia.org; matches the deployed bot's RPC.
         rpcUrl: 'https://ethereum-sepolia-rpc.publicnode.com',
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
@@ -70,6 +78,7 @@ export const NETWORKS = {
         chainId: 8453,
         chainName: 'Base',
         rpcUrl: 'https://mainnet.base.org',
+        blockTimeSec: 2,
         assetNames: ['ETH', 'BTC', 'SOL', 'AVAX', 'LINK', 'AAVE', 'DOGE', 'ARB'],
         usdcDecimals: 6,
         priceDecimals: 8,
@@ -112,6 +121,7 @@ export function resolveNetwork(name) {
             usdcDecimals: 6,
             priceDecimals: 8,
             usdcMintable: true,
+            blockTimeSec: Number(process.env.PROPFUND_BLOCK_TIME_SEC || 2),
         };
     }
 
