@@ -26,7 +26,7 @@ import { formatUnits, parseUnits, getAddress } from 'ethers';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { buildContext, assertAssetMapping } from '../src/context.js';
 import { decodeError } from '../src/errors.js';
-import { resolveNetwork } from '../src/networks.js';
+import { resolveNetwork, hermesHeaders } from '../src/networks.js';
 import { runWithWatchdog } from '../src/watchdog.js';
 
 const MODEL = process.env.AGENT_MODEL;
@@ -659,7 +659,7 @@ async function fetchPythUpdate(network, priceIds) {
     const ids = (priceIds && priceIds.length) ? priceIds : network.pythPriceIds;
     const url = `${network.hermesUrl}/v2/updates/price/latest?` +
         ids.map(id => `ids[]=${id.startsWith('0x') ? id : '0x' + id}`).join('&');
-    const res = await fetch(url, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+    const res = await fetch(url, { headers: hermesHeaders({ 'User-Agent': 'propfund-agent/0.1' }) });
     if (!res.ok) throw new Error(`Hermes ${res.status}: ${await res.text().then(t => t.slice(0, 200))}`);
     const body = await res.json();
     const hex = body.binary?.data;

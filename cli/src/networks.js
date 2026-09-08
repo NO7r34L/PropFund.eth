@@ -98,6 +98,14 @@ export const NETWORKS = {
     },
 };
 
+// Hermes has required authentication since the Pyth Core upgrade (2026-08-26 16:00 UTC).
+// Set PYTH_API_KEY. Unauthenticated calls return 401 on every route that serves signed
+// price updates. Returns `extra` unchanged when no key is set so local/mock setups still work.
+export function hermesHeaders(extra = {}) {
+    const key = process.env.PYTH_API_KEY;
+    return key ? { ...extra, Authorization: `Bearer ${key}` } : extra;
+}
+
 export function resolveNetwork(name) {
     const key = (name || process.env.PROPFUND_NETWORK || 'basesepolia').toLowerCase();
 
@@ -151,5 +159,8 @@ export function resolveNetwork(name) {
         const known = [...Object.keys(NETWORKS), 'local', 'baselocal'].join(', ');
         throw new Error(`unknown network "${key}". known: ${known}`);
     }
-    return { ...net, key };
+    // PYTH_HERMES_URL points at the upgraded endpoint (https://pyth.dourolabs.app/hermes) for
+    // the "early upgrade" path. The default keeps hermes.pyth.network, which the DAO upgraded
+    // in place — same routes and response shapes, but it still needs the API key.
+    return { ...net, key, hermesUrl: process.env.PYTH_HERMES_URL || net.hermesUrl };
 }
