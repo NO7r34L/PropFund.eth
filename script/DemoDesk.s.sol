@@ -58,6 +58,7 @@ contract DemoDeskScript is Script {
             minProfitFactorBps: 0,
             staleAfter: 1 hours,
             maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,   // production bracket bounds
+            flashFeeBps: 5,
             scaleT2Bps: 200,     // $10 realized  -> 2x   (demo; prod 2000 = $100)
             scaleT4Bps: 500,     // $25           -> 4x   (demo; prod 5000 = $250)
             scaleT8Bps: 1000,    // $50           -> 8x   (demo; prod 12000 = $600)

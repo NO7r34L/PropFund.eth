@@ -5,6 +5,7 @@ import {IERC20} from "./interfaces/IERC20.sol";
 import {IPyth} from "./interfaces/IPyth.sol";
 import {ISwapVenue} from "./interfaces/ISwapVenue.sol";
 import {IPropFundLens} from "./interfaces/IPropFundLens.sol";
+import {IERC3156FlashBorrower, IERC3156FlashLender} from "./interfaces/IERC3156.sol";
 import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 
 /// @title AgentDesk — a real prop desk for agents, funded by the firm's own capital.
@@ -44,10 +45,14 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 ///             the firm's maximum loss on the book (allocation x drawdown). Scaling up draws the
 ///             shortfall from the agent's own unclaimed winnings; if those can't cover it, the
 ///             scale-up is capped. A blow-up at any tier makes the firm whole.
+///         Idle capital is not dead capital: the desk is an ERC-3156 FLASH LENDER of `firmIdle`.
+///         A flash loan leaves and returns within one transaction or the whole thing reverts, so
+///         the USDC is never exposed to price, credit or duration — it is still "parked in USDC"
+///         — and every loan pays FLASH_FEE_BPS into firmProfit, offsetting the desk's fees.
 ///         The firm's economics are the firm's own risk-managed bet — exactly what founding a
 ///         prop firm is — not a promise to third parties.
 /// @dev PropFund is read-only from here. Cancun transient storage for reentrancy.
-contract AgentDesk {
+contract AgentDesk is IERC3156FlashLender {
     using SafeTransferLib for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -77,6 +82,13 @@ contract AgentDesk {
     error BracketWidened();
     /// @notice executeExit: neither take-profit, stop-loss nor max-hold has hit.
     error NotExecutable();
+    /// @notice Flash loans are USDC only.
+    error UnsupportedToken();
+    /// @notice Borrower's onFlashLoan did not return the ERC-3156 success value.
+    error FlashCallbackFailed();
+    /// @notice Stricter than EIP-3156: only a receiver may initiate its own loan (no third party can
+    ///         push a loan — and a fee — onto a contract that happens to hold an approval).
+    error FlashInitiatorNotReceiver();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -99,6 +111,7 @@ contract AgentDesk {
     event Revoked(address indexed agent, uint256 bookReturned, uint256 deposit, bool forfeited);
     event Resigned(address indexed agent);
     event Claimed(address indexed agent, uint256 amount);
+    event FlashLoaned(address indexed receiver, address indexed initiator, uint256 amount, uint256 fee);
 
     /*//////////////////////////////////////////////////////////////
                               CONFIG (IMMUTABLE)
@@ -137,6 +150,8 @@ contract AgentDesk {
     uint256 public immutable MAX_TARGET_BPS;
     /// @notice Hard maximum age of an ETH position (seconds). Past it, anyone can executeExit.
     uint256 public immutable MAX_HOLD;
+    /// @notice Flash-loan fee on firmIdle (bps of the amount). Accrues to firmProfit.
+    uint256 public immutable FLASH_FEE_BPS;
 
     /// @notice Allocation ladder: realized desk PnL (as bps of BASE_ALLOCATION) that unlocks 2x/4x/8x.
     uint256 public immutable SCALE_T2_BPS;
@@ -160,6 +175,7 @@ contract AgentDesk {
     /// @dev eth(1e18) × price(1e8) / 1e20 = usdc(1e6).
     uint256 internal constant ETH_PRICE_TO_USDC = 1e20;
     bytes32 internal constant REENTRANCY_SLOT = keccak256("AgentDesk.reentrancy");
+    bytes32 internal constant FLASH_CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     /*//////////////////////////////////////////////////////////////
                                   STATE
@@ -246,6 +262,7 @@ contract AgentDesk {
         uint256 maxStopBps;
         uint256 maxTargetBps;
         uint256 maxHold;
+        uint256 flashFeeBps;
         uint256 scaleT2Bps;
         uint256 scaleT4Bps;
         uint256 scaleT8Bps;
@@ -268,6 +285,7 @@ contract AgentDesk {
         if (c.agentDeposit < c.baseAllocation * c.maxDrawdownBps / 10_000) revert BadConfig();
         if (c.maxAllocationMult == 0 || c.maxAllocationMult > 8) revert BadConfig();
         if (c.maxStopBps == 0 || c.maxStopBps > c.maxDrawdownBps || c.maxTargetBps == 0 || c.maxHold == 0) revert BadConfig();
+        if (c.flashFeeBps > 1_000) revert BadConfig();
         if (!(c.scaleT2Bps < c.scaleT4Bps && c.scaleT4Bps < c.scaleT8Bps)) revert BadConfig();
         if (!(c.scalePfT2Bps <= c.scalePfT4Bps && c.scalePfT4Bps <= c.scalePfT8Bps)) revert BadConfig();
         OWNER = c.owner;
@@ -288,6 +306,7 @@ contract AgentDesk {
         MAX_STOP_BPS = c.maxStopBps;
         MAX_TARGET_BPS = c.maxTargetBps;
         MAX_HOLD = c.maxHold;
+        FLASH_FEE_BPS = c.flashFeeBps;
         SCALE_T2_BPS = c.scaleT2Bps;
         SCALE_T4_BPS = c.scaleT4Bps;
         SCALE_T8_BPS = c.scaleT8Bps;
@@ -512,6 +531,46 @@ contract AgentDesk {
         earned[msg.sender] = 0;
         USDC.safeTransfer(msg.sender, amount);
         emit Claimed(msg.sender, amount);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         FLASH LENDING (ERC-3156)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice How much USDC can be flash-borrowed right now: the firm's idle capital. Books,
+    ///         deposits and earned shares are never lent — they belong to the agents' risk.
+    function maxFlashLoan(address token) public view returns (uint256) {
+        return (token == address(USDC) && !paused) ? firmIdle : 0;
+    }
+
+    function flashFee(address token, uint256 amount) public view returns (uint256) {
+        if (token != address(USDC)) revert UnsupportedToken();
+        return amount * FLASH_FEE_BPS / 10_000;
+    }
+
+    /// @notice Lend `amount` of idle USDC for the duration of this transaction. The borrower's
+    ///         callback runs with the desk's reentrancy lock held, so nothing on the desk can be
+    ///         touched while its capital is out; the loan plus fee is then PULLED back from the
+    ///         borrower (safeTransferFrom reverts on any shortfall), so the transaction either ends
+    ///         with the desk richer by the fee or never happened. Fee → firmProfit.
+    function flashLoan(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
+        external
+        nonReentrant
+        returns (bool)
+    {
+        if (paused) revert Paused();
+        if (msg.sender != address(receiver)) revert FlashInitiatorNotReceiver();
+        if (token != address(USDC)) revert UnsupportedToken();
+        if (amount == 0 || amount > firmIdle) revert InsufficientIdle();
+        uint256 fee = amount * FLASH_FEE_BPS / 10_000;
+
+        USDC.safeTransfer(msg.sender, amount);
+        if (receiver.onFlashLoan(msg.sender, token, amount, fee, data) != FLASH_CALLBACK_SUCCESS) revert FlashCallbackFailed();
+        USDC.safeTransferFrom(msg.sender, address(this), amount + fee);   // the repayment guarantee
+
+        firmProfit += fee;
+        emit FlashLoaned(address(receiver), msg.sender, amount, fee);
+        return true;
     }
 
     /*//////////////////////////////////////////////////////////////

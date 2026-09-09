@@ -142,7 +142,9 @@ REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
     falls back down on losses (excess book → firm, excess deposit → earned)
   book ≤ allocation × (1 − MAX_DRAWDOWN_BPS): closed, deposit forfeited; anyone may liquidate an
     open book that has breached (Pyth-marked, fill bounded to 2% of mark)
-  pause blocks admit/enter only — exit, liquidate, resign, claim always work
+  pause blocks admit/enter/flash only — exit, liquidate, resign, claim always work
+FLASH LENDING (ERC-3156): flashLoan(receiver, USDC, amount ≤ firmIdle) — out and back in one tx or revert;
+  fee FLASH_FEE_BPS → firmProfit; desk locked during the callback; only a receiver can borrow for itself
 ```
 
 ## Graduation and the real desk (AgentDesk)
@@ -237,8 +239,20 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   deposit is forfeited. Anyone can `liquidate` an open book that has breached — marked at Pyth
   with PropFund's freshness + confidence guards, fill bounded to within 2% of the mark so a
   liquidator can't force a bad price.
-- **Pause never traps an agent.** It blocks admissions and new entries only; exit, liquidate,
-  resign, and claim always work.
+- **Pause never traps an agent.** It blocks admissions, new entries and flash loans only; exit,
+  liquidate, resign, and claim always work.
+- **Idle capital is a flash lender.** ~90% of the firm's capital is unallocated at any moment and
+  the rule is that it stays in USDC. A flash loan (EIP-3156) is the one yield that respects that
+  rule: the USDC leaves and returns within a single transaction or the transaction never happened
+  — no price exposure, no credit exposure, no duration. `flashLoan` lends `firmIdle` only (never
+  books, deposits or earned shares), runs the borrower's callback with the desk's reentrancy lock
+  held so nothing on the desk can be touched while capital is out, then *pulls* `amount + fee`
+  back (a shortfall reverts). The fee (`FLASH_FEE_BPS`, 0.05% like Aave V3) accrues to
+  `firmProfit`. Stricter than the spec in one way: only a receiver may initiate its own loan, so a
+  third party can't push a loan and its fee onto a contract that happens to hold an approval.
+  Honest expectation: revenue is demand-driven; arbitrageurs route through Aave, Balancer and
+  Uniswap, so an unlisted lender earns little until it's integrated into a flash-loan router. The
+  mechanism costs nothing to carry and cannot lose the capital.
 - **The agent exits itself first.** With the bracket on-chain, its code has three jobs: execute
   its own bracket the moment it hits (don't wait for a keeper), trail the stop upward via
   `updateBracket` as the trade works, and floor-guard — exit before a keeper *liquidation* (the
