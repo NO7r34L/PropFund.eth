@@ -38,6 +38,7 @@ const LOG_PATH = process.env.AGENT_LOG || '/tmp/propfund-agent.log';
 // the volume mount keeps it across redeploys.
 const HISTORY_PATH = process.env.AGENT_HISTORY || (LOG_PATH.replace(/\.log$/, '') + '-history.jsonl');
 const PEAK_DEPOSIT_PATH = process.env.AGENT_PEAK_DEPOSIT || (LOG_PATH.replace(/\.log$/, '') + '-peak.json');
+const WATCH_PLAN_PATH = process.env.AGENT_WATCH_PLAN_PATH || (LOG_PATH.replace(/\.log$/, '') + '-watchplan.json');
 const MIN_ETH_WEI = 1_000_000_000_000_000n;  // 0.001
 const MAX_ACTIONS = Number(process.env.AGENT_MAX_ACTIONS || 100);
 const MAX_EVAL_CANCELS = 3;
@@ -83,6 +84,13 @@ const ICT_KILLZONES = (process.env.ICT_KILLZONES ?? '07:00-10:00,12:00-15:00')
     .map(w => { const [a, b] = w.split('-'); const m = t => { const [h, mi] = t.split(':').map(Number); return h * 60 + mi; }; return [m(a), m(b)]; });
 // Wake the LLM when price is within this % of a key level (a level tag / potential reaction).
 const ICT_LEVEL_PROX_PCT = Number(process.env.ICT_LEVEL_PROX_PCT || 0.15);
+
+// --- Agent-directed watch plan (supersedes the static ICT gate when on) ---
+// The LLM declares, in a "watch" object, the price levels and next wake-time it cares about. A
+// free watcher re-consults it only when a level is crossed, the scheduled time arrives, or a
+// safety idle cap elapses — so the agent sets its OWN markers instead of being polled on a timer.
+const AGENT_WATCH_PLAN = process.env.AGENT_WATCH_PLAN === '1';
+const MAX_WATCH_IDLE_MIN = Number(process.env.MAX_WATCH_IDLE_MIN || 360);
 // msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on
 // Base). The router pays the exact fee and refunds the rest, so a comfortable buffer is free.
 const ROUTER_VALUE = BigInt(process.env.ROUTER_VALUE_WEI || 1_000_000);
@@ -144,6 +152,20 @@ ACTIONS REFERENCE (the FULL set — but only a subset is legal each tick. Each u
 - {"action": "WITHDRAW_PROFIT", "args": {"amount_usdc": "<decimal>"}}
 - {"action": "RESIGN"} — exit funded status
 
+OPTIONAL — SELF-SCHEDULING (you are NOT polled on a fixed timer; you set your own wake conditions):
+Add a "watch" object to your response to say WHEN you want to be consulted next. Between wakes a
+cheap watcher checks price and the clock for free and only calls you again when one of YOUR triggers
+fires — so you are not billed for staring at a dead market. Shape:
+{"watch": {
+  "levels": [{"asset":"ETH","price":2450,"dir":"below"}, {"asset":"BTC","price":80000,"dir":"above"}],
+  "wake_at_utc": "12:00",   // optional: also wake me at this UTC time (e.g. a session open)
+  "max_idle_min": 120       // optional safety: wake me anyway after this long (default 360)
+}}
+Put levels at the prices where your thesis actually changes — a key prior-day/session high or low, a
+breakout trigger, an invalidation — NOT next to the current price (that defeats the purpose). "dir"
+is the side price must cross to. If you have no active view, set few/no levels and a wider
+max_idle_min so you sleep cheaply. When re-woken you'll be told which trigger fired.
+
 CONSTRAINTS:
 - Don't open positions if oracle is stale (you'll see fresh: false in price data)
 - Don't try to claim_funding if eval not passed
@@ -153,6 +175,8 @@ CONSTRAINTS:
 const STATE = {
     actionsTaken: 0,
     evalCancels: 0,
+    watchPlan: null,     // agent-directed { setAt, levels[], armed[], wakeAt, maxIdleSec }
+    wokenReason: null,   // why the watcher re-consulted the LLM this tick (for the prompt)
     lastWriteTime: 0,
     history: [],         // last 20 actions for context — restored from disk on startup
     peakDeposit: 0n,     // peak USDC deposit observed in funded mode (raw 6-decimal). Used
@@ -367,6 +391,75 @@ const MIN_EDGE_SCORE = Number(process.env.EVAL_MIN_EDGE_SCORE || 0.50);
 // Build per-asset signals + a cross-asset ranking. Each asset has its own trend/momentum/range
 // for both 15m and 1h timeframes. The 1h is the higher-timeframe context — entries get a
 // confluence bonus when 15m and 1h trends agree, and a penalty when they fight.
+const spotOf = (state, asset) => Number(state.assets.find(a => a.name === String(asset).toUpperCase())?.price || 0);
+
+function restoreWatchPlan() {
+    try { if (existsSync(WATCH_PLAN_PATH)) STATE.watchPlan = JSON.parse(readFileSync(WATCH_PLAN_PATH, 'utf8')); } catch {}
+}
+function saveWatchPlan() {
+    try { writeFileSync(WATCH_PLAN_PATH, JSON.stringify(STATE.watchPlan)); } catch {}
+}
+
+// Normalize the LLM's raw "watch" object into a stored plan: resolve each level's cross direction
+// and the side price sits on now (to detect a genuine cross, never an instant self-trigger),
+// resolve wake_at_utc to the next absolute UTC occurrence, and clamp the idle cap.
+function setWatchPlan(raw, state, nowSec) {
+    if (!raw || typeof raw !== 'object') {
+        STATE.watchPlan = { setAt: nowSec, levels: [], armed: [], wakeAt: null, maxIdleSec: MAX_WATCH_IDLE_MIN * 60 };
+        saveWatchPlan(); return;
+    }
+    const levels = (Array.isArray(raw.levels) ? raw.levels : []).slice(0, 8).map(l => {
+        const asset = String(l?.asset || '').toUpperCase();
+        const price = Number(l?.price);
+        if (!asset || !(price > 0) || !assetAllowed(asset)) return null;
+        const spot = spotOf(state, asset);
+        const sideNow = spot && spot >= price ? 'above' : 'below';
+        const dir = (l.dir === 'above' || l.dir === 'below') ? l.dir : (sideNow === 'above' ? 'below' : 'above');
+        return { asset, price, dir };
+    }).filter(Boolean);
+    const armed = levels.map(l => { const spot = spotOf(state, l.asset); return spot && spot >= l.price ? 'above' : 'below'; });
+    let wakeAt = null;
+    if (typeof raw.wake_at_utc === 'string' && /^\d{1,2}:\d{2}$/.test(raw.wake_at_utc)) {
+        const [h, mi] = raw.wake_at_utc.split(':').map(Number);
+        const d = new Date(nowSec * 1000); d.setUTCHours(h, mi, 0, 0);
+        let t = Math.floor(d.getTime() / 1000); if (t <= nowSec) t += 86400;
+        wakeAt = t;
+    }
+    const maxIdleSec = Math.min(Math.max(Number(raw.max_idle_min) || MAX_WATCH_IDLE_MIN, 5), 24 * 60) * 60;
+    STATE.watchPlan = { setAt: nowSec, levels, armed, wakeAt, maxIdleSec };
+    saveWatchPlan();
+}
+
+// Has any of the agent's declared triggers fired? Returns {triggered, reason}.
+function evalWatchTriggers(plan, state, nowSec) {
+    if (!plan) return { triggered: true, reason: 'no-plan' };
+    for (let i = 0; i < plan.levels.length; i++) {
+        const lv = plan.levels[i];
+        const spot = spotOf(state, lv.asset);
+        if (!spot) continue;
+        const side = spot >= lv.price ? 'above' : 'below';
+        if (side !== plan.armed[i] && side === lv.dir) {
+            return { triggered: true, reason: `${lv.asset} crossed ${lv.dir} ${lv.price} (now ${spot.toFixed(4)})` };
+        }
+    }
+    if (plan.wakeAt && nowSec >= plan.wakeAt) return { triggered: true, reason: `scheduled wake ${new Date(plan.wakeAt * 1000).toISOString().slice(11, 16)} UTC` };
+    if (nowSec - plan.setAt >= plan.maxIdleSec) return { triggered: true, reason: `max-idle ${Math.round(plan.maxIdleSec / 60)}m elapsed` };
+    return { triggered: false, reason: null };
+}
+
+// Compact watch-plan summary for the hold log — distance to each level + time remaining.
+function summarizeWatch(plan, state, nowSec) {
+    if (!plan) return null;
+    return {
+        levels: plan.levels.map((lv, i) => {
+            const spot = spotOf(state, lv.asset);
+            return `${lv.asset} ${lv.dir} ${lv.price} (${spot ? ((spot - lv.price) / lv.price * 100).toFixed(2) + '%' : '?'})`;
+        }),
+        wakeAt: plan.wakeAt ? new Date(plan.wakeAt * 1000).toISOString().slice(11, 16) + 'UTC' : null,
+        idleLeftMin: Math.max(0, Math.round((plan.maxIdleSec - (nowSec - plan.setAt)) / 60)),
+    };
+}
+
 // Is `date` (UTC) inside any configured killzone window? Empty config = always true (gate off).
 function inKillzone(date, zones = ICT_KILLZONES) {
     if (!zones.length) return true;
@@ -618,7 +711,7 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     // an open virtual trade (asset is already picked, focus on the close decision).
     const showMultiAsset = !(state.eval?.active && state.eval?.in_virtual_trade);
 
-    return `
+    return `${STATE.wokenReason ? `== WOKEN BECAUSE ==\nYour watcher re-consulted you: ${STATE.wokenReason}. Decide, then set a fresh \"watch\" plan.\n\n` : ''}
 == VALID ACTIONS RIGHT NOW ==
 You may ONLY pick one of: ${validActions.map(a => `"${a}"`).join(', ')}.
 Anything else (including invented names like "OPEN_LONG") will be rejected without being sent on-chain. Pick from this list, no exceptions.
@@ -1051,9 +1144,18 @@ async function tick(ctx) {
           )
         : null;
 
-    // ICT entry gate: when flat and hunting an entry, only consult the (costly) LLM during a
-    // session killzone AND when price is tagging a key level. Otherwise cheap-skip — no LLM call.
-    if (ICT_ENTRY_GATE && !state.position) {
+    // Entry gating (flat only — exits are deterministic above). Agent-directed watch plan takes
+    // precedence over the static ICT gate: if the LLM set its own wake conditions, honor them.
+    STATE.wokenReason = null;
+    if (AGENT_WATCH_PLAN && !state.position) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const trig = evalWatchTriggers(STATE.watchPlan, state, nowSec);
+        if (STATE.watchPlan && !trig.triggered) {
+            log('EXEC', 'watch-hold', { pending: summarizeWatch(STATE.watchPlan, state, nowSec) });
+            return;
+        }
+        STATE.wokenReason = trig.reason;   // surfaced to the LLM so it knows why it woke
+    } else if (ICT_ENTRY_GATE && !state.position) {
         const now = new Date();
         let skip = null, detail = {};
         if (!inKillzone(now)) {
@@ -1098,6 +1200,10 @@ async function tick(ctx) {
         return;
     }
     log('LLM', 'decision', { action: llmResult.parsed.action, reasoning: llmResult.parsed.reasoning, usage: llmResult.usage });
+    if (AGENT_WATCH_PLAN && !state.position) {
+        setWatchPlan(llmResult.parsed.watch, state, Math.floor(Date.now() / 1000));
+        log('EXEC', 'watch-set', summarizeWatch(STATE.watchPlan, state, Math.floor(Date.now() / 1000)));
+    }
 
     // Deterministic asset selection for eval entries: the LLM decides WHETHER to enter; the
     // runtime enforces WHICH asset (the top-ranked momentum setup) and vetoes the entry when
@@ -1152,6 +1258,7 @@ async function main() {
 
     restoreHistory();
     restorePeakDeposit();
+    restoreWatchPlan();
     log('INFO', 'agent-start', {
         network: ctx.net.key,
         address: ctx.wallet.address,
