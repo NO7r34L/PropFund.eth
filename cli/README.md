@@ -231,6 +231,9 @@ Environment variables:
 | `OPENROUTER_API_KEY` | required only when `LLM_BASE_URL` targets OpenRouter        |
 | `PYTH_API_KEY`     | required — every Hermes price fetch is authenticated          |
 | `AGENT_ASSETS`     | optional allowlist, e.g. `ETH,BTC,SOL,DOGE` — restrict trading to feeds your Pyth key is entitled to (un-entitled feeds 403) |
+| `ICT_ENTRY_GATE`   | `1` to only consult the LLM during session killzones AND when price tags a key level — cheap-skip otherwise (big cost cut). Exits stay deterministic. Default off |
+| `ICT_KILLZONES`    | UTC windows `HH:MM-HH:MM,...` (default `07:00-10:00,12:00-15:00` = London + NY). Empty = no time gate |
+| `ICT_LEVEL_PROX_PCT` | wake the LLM when price is within this %% of a key level (prior-day / prior-session high-low). Default `0.15` |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |
 | `AGENT_LOG`        | JSONL log path (default `/tmp/propfund-agent.log`)           |
