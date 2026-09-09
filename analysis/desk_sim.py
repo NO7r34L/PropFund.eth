@@ -32,7 +32,8 @@ DEPOSIT   = 50.0
 MAX_DD    = 0.10
 SPLIT     = 0.40          # agent share of realized profit (DeployDesk default 4000 bps)
 T2, T4, T8 = 0.20, 0.50, 1.20   # of BASE: $100 / $250 / $600 realized (SCALE_T*_BPS)
-MIN_TRADES = (40, 80, 120)      # SCALE_MIN_TRADES x 1/2/3 closed desk trades
+MIN_SAMPLE = 20                 # SCALE_MIN_TRADES: sample floor before any tier (any frequency)
+PF_TIERS = (1.3, 1.5, 1.8)      # SCALE_PF_T2/T4/T8: profit factor (gross wins / gross losses) per tier
 MAX_MULT  = 8
 FRICTION  = 0.0017        # measured $0.86 on a $500 round trip on the devnet venue (0.1%/side)
 FIRM_CAPITAL = 5_000.0 * 100   # $500k idle for 1000 agents (5000 per 10 agents)
@@ -76,7 +77,8 @@ def window_return(px, d, hold_days, sl, tp, trail_arm=None, trail_give=None):
 
 
 def run(regime, ladder, hurdle, n=N_AGENTS, trade_every=3, hold_days=2, seed=0,
-        tiers=(T2, T4, T8), min_trades=(0, 0, 0), sl=None, tp=None, trail=(None, None), years=1, split=SPLIT):
+        tiers=(T2, T4, T8), min_trades=(0, 0, 0), sl=None, tp=None, trail=(None, None), years=1, split=SPLIT,
+        pf_tiers=None, min_sample=0):
     """Simulate `years`. Returns firm P&L decomposition + per-agent outcomes."""
     global rng, DAYS, SPLIT
     rng = np.random.default_rng(seed)
@@ -94,6 +96,7 @@ def run(regime, ladder, hurdle, n=N_AGENTS, trade_every=3, hold_days=2, seed=0,
     bench = np.full(n, px[0])
     firm_idle -= n * BASE
     trades = np.zeros(n, int); revoked = np.zeros(n, bool)
+    gross_win = np.zeros(n); gross_loss = np.zeros(n)
     peak_mult = np.ones(n)
 
     for d in range(0, DAYS - hold_days, trade_every):
@@ -110,6 +113,7 @@ def run(regime, ladder, hurdle, n=N_AGENTS, trade_every=3, hold_days=2, seed=0,
         out = entry * (1.0 + move) * (1.0 - FRICTION)
         pnl = out - entry
         cum[idx] += pnl
+        gross_win[idx] += np.maximum(pnl, 0); gross_loss[idx] += np.maximum(-pnl, 0)
         # settle
         profit = np.maximum(out - alloc[idx], 0.0)
         agent_cut = profit * SPLIT
@@ -134,9 +138,16 @@ def run(regime, ladder, hurdle, n=N_AGENTS, trade_every=3, hold_days=2, seed=0,
             beats = cum[ok] >= h
             mult = np.ones(ok.size)
             nt = trades[ok]
-            mult[beats & (cum[ok] >= BASE * t2) & (nt >= min_trades[0])] = 2
-            mult[beats & (cum[ok] >= BASE * t4) & (nt >= min_trades[1])] = 4
-            mult[beats & (cum[ok] >= BASE * t8) & (nt >= min_trades[2])] = 8
+            if pf_tiers:   # quality gate: profit factor (gross wins / gross losses) per tier + a small sample floor
+                pf = gross_win[ok] / np.maximum(gross_loss[ok], 1e-9)
+                g2 = (pf >= pf_tiers[0]) & (nt >= min_sample)
+                g4 = (pf >= pf_tiers[1]) & (nt >= min_sample)
+                g8 = (pf >= pf_tiers[2]) & (nt >= min_sample)
+            else:
+                g2 = nt >= min_trades[0]; g4 = nt >= min_trades[1]; g8 = nt >= min_trades[2]
+            mult[beats & (cum[ok] >= BASE * t2) & g2] = 2
+            mult[beats & (cum[ok] >= BASE * t4) & g4] = 4
+            mult[beats & (cum[ok] >= BASE * t8) & g8] = 8
             mult = np.minimum(mult, MAX_MULT)
             target = BASE * mult
             for j, a in enumerate(ok):          # sequential: firm_idle is shared
@@ -201,24 +212,20 @@ def avg_runs(**kw):
 
 if __name__ == "__main__":
     import sys
-    print(f"AgentDesk, {N_AGENTS} agents, ${FIRM_CAPITAL:,.0f} firm capital, base ${BASE:.0f}, dd {MAX_DD:.0%}, friction {FRICTION:.2%}/round-trip")
-    print("skill: 85% noise / 10% edge (rho~0.15) / 5% anti-skill; enters ~27% of windows. firm %/yr is ANNUALIZED")
-    print("Rows: what shipped before this change (flat $500 book, 50/50, SL3/TP2) vs what is deployed now.\n")
-    OLD_EXIT = dict(sl=0.03, tp=0.02, trail=(0.01, 0.005), hold_days=3)
-    NEW_EXIT = dict(sl=0.015, tp=0.06, trail=(0.03, 0.015), hold_days=7)
-    LADDER = dict(ladder=True, hurdle=True, tiers=(T2, T4, T8), min_trades=MIN_TRADES, split=SPLIT)
-    ROWS = [("OLD: flat, 50/50, SL3/TP2",              dict(ladder=False, hurdle=False, split=0.50, **OLD_EXIT)),
-            ("    + exit manager only (SL1.5/TP6)",   dict(ladder=False, hurdle=False, split=0.50, **NEW_EXIT)),
-            ("    + ladder, no track-record gate",    dict(ladder=True, hurdle=True, tiers=(T2, T4, T8), min_trades=(0, 0, 0), split=0.50, **NEW_EXIT)),
-            ("NEW: ladder + hurdle + 40/80/120 + 60/40", dict(**LADDER, **NEW_EXIT))]
+    print(f"AgentDesk, {N_AGENTS} agents, ${FIRM_CAPITAL:,.0f} firm capital, base ${BASE:.0f}, dd {MAX_DD:.0%}, split {SPLIT:.0%}, friction {FRICTION:.2%}/round-trip")
+    print("skill: 85% noise / 10% edge (rho~0.15) / 5% anti-skill. firm %/yr is ANNUALIZED. Gate = what unlocks a ladder tier.\n")
+    EXIT = dict(sl=0.015, tp=0.06, trail=(0.03, 0.015))
+    FREQS = [("HIGH-FREQ (~100 trades/yr)", dict(hold_days=1, trade_every=1)), ("weekly holds (~25/yr)", dict(hold_days=7, trade_every=3))]
+    GATES = [("count 40/80/120 (PR #39)",         dict(min_trades=(40, 80, 120))),
+             ("no gate",                          dict(min_trades=(0, 0, 0))),
+             ("DEPLOYED: PF 1.3/1.5/1.8, sample 20", dict(pf_tiers=PF_TIERS, min_sample=MIN_SAMPLE)),
+             ("PF 2.0/2.5/3.0, sample 20",        dict(pf_tiers=(2.0, 2.5, 3.0), min_sample=20))]
     years = int(sys.argv[1]) if sys.argv[1:] else 2
-    regimes = sys.argv[2:] or ["chop", "mixed", "bull", "bear"]
-    for regime in regimes:
-        print(f"--- {regime}, {years}y ---")
-        for label, kw in ROWS:
-            r = avg_runs(regime=regime, years=years, **kw)
-            dep = 50 * r['agents_revoked']
-            print(f"  {label:<42} ETH {r['eth']*100:+6.1f}% | firm {r['firm_ret']*100:+6.2f}%/yr | split ${r['firm_profit']-dep:>7,.0f} deposits ${dep:>7,.0f} "
-                  f"| revoked {r['agents_revoked']:4.0f} (skilled {r['skilled_revoked']*100:3.0f}%) scaled {r['agents_scaled']:4.0f} prec {r['precision']*100:3.0f}% "
-                  f"| cum skilled ${r['skilled_cum']:>6,.0f} noise ${r['noise_cum']:>6,.0f} | trades {r['mean_trades']:4.1f}")
-        print()
+    for freq, fq in FREQS:
+        for regime in (sys.argv[2:] or ["chop", "mixed", "bull", "bear"]):
+            print(f"--- {freq}, {regime}, {years}y ---")
+            for label, g in GATES:
+                r = avg_runs(regime=regime, years=years, ladder=True, hurdle=True, tiers=(T2, T4, T8), split=SPLIT, **EXIT, **fq, **g)
+                print(f"  {label:<38} firm {r['firm_ret']*100:+6.2f}%/yr | scaled {r['agents_scaled']:4.0f} 8x {r['agents_8x']:3.0f} precision {r['precision']*100:3.0f}% "
+                      f"| revoked {r['agents_revoked']:4.0f} (skilled {r['skilled_revoked']*100:3.0f}%) | cum skilled ${r['skilled_cum']:>6,.0f} noise ${r['noise_cum']:>6,.0f} | trades {r['mean_trades']:5.1f}")
+            print()

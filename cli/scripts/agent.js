@@ -176,10 +176,12 @@ firm's capital. PropFund probation entries are over. Your only job is timing ONE
 whole book — you are either in USDC or in ETH. The book has a hard drawdown floor
 (state.desk.drawdown_floor_usdc): if its marked value reaches it, a keeper liquidates you and your
 deposit is FORFEITED. The code's automated stop is set well inside that floor — let it work; never
-hold through a loss hoping. Your ALLOCATION SCALES (1x → 2x → 4x → 8x) with REALIZED profit — but only
-when that profit beats what simply holding ETH since your admission would have made
-(state.desk.hold_hurdle_usdc). Beta is not paid; timing is. Your earned share is held as collateral for
-the bigger book and released automatically (claims are handled by the code, not you).
+hold through a loss hoping. Your ALLOCATION SCALES (1x → 2x → 4x → 8x) with REALIZED profit — gated on
+your WIN RATIO as profit factor (gross wins / gross losses ≥ 1.3 / 1.5 / 1.8 per tier, over a small sample
+of closed trades) and only when that profit beats what simply holding ETH since your admission would have
+made (state.desk.hold_hurdle_usdc). Beta is not paid; timing is. Profit factor is size-weighted, so a high
+win rate from tiny targets and wide stops does NOT scale you — quality of wins does. Your earned share is
+held as collateral for the bigger book and released automatically (claims are handled by the code, not you).
 
 OPTIONAL — SELF-SCHEDULING (you are NOT polled on a fixed timer; you set your own wake conditions):
 Add a "watch" object to your response to say WHEN you want to be consulted next. Between wakes a
@@ -305,11 +307,12 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
     // graduation (desk) in one state object. Only when a desk is wired.
     let desk = null;
     if (DESK) {
-        const [bk, bv, floor, liq, qual, earnedRaw, dep, lad, baseAlloc, maxMult] = await Promise.all([
+        const [bk, bv, floor, liq, qual, earnedRaw, dep, lad, baseAlloc, maxMult, wr, sampleFloor] = await Promise.all([
             DESK.getBook(me), DESK.bookValue(me), DESK.drawdownFloor(me), DESK.isLiquidatable(me),
             DESK.qualifies(me), DESK.earned(me), DESK.AGENT_DEPOSIT(), DESK.ladder(me),
-            DESK.BASE_ALLOCATION(), DESK.MAX_ALLOCATION_MULT(),
+            DESK.BASE_ALLOCATION(), DESK.MAX_ALLOCATION_MULT(), DESK.winRatio(me), DESK.SCALE_MIN_TRADES(),
         ]);
+        const pfBps = wr.profitFactorBps ?? wr[0];
         const inEth = bk.eth > 0n;
         const markFresh = Boolean(bv.fresh ?? bv[1]);
         // A stale mark comes back as (0, false). NEVER turn that into a -100% "loss" — it would trip
@@ -332,6 +335,11 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
                 at_max_allocation: bk.allocation >= maxAlloc,
                 realized_pnl_usdc: formatUnits(bk.cumPnl, 6),
                 desk_trades: Number(bk.trades),
+                // Win ratio the ladder gates on: profit factor = gross wins / gross losses (size-weighted,
+                // exit-shape-independent). Win rate is shown for the record but is NOT what scales the book.
+                win_rate: `${(Number(wr.winRateBps ?? wr[1]) / 100).toFixed(1)}%`,
+                profit_factor: pfBps >= 2n ** 128n ? 'inf' : (Number(pfBps) / 10_000).toFixed(2),
+                ladder_sample_floor_trades: Number(sampleFloor),
                 // Allocation ladder: the book grows only on realized alpha over holding ETH since admission.
                 ladder_mult_now: Number(lad.mult ?? lad[0]),
                 hold_hurdle_usdc: formatUnits(lad.hurdle ?? lad[1], 6),
@@ -828,7 +836,7 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     if (state.desk?.admitted) {
         hints.push(state.desk.in_eth
             ? `DESK: IN ETH — book marked ${state.desk.book_value_usdc} USDC (${state.desk.unrealized_return} vs entry), liquidation floor ${state.desk.drawdown_floor_usdc}. Exit is AUTOMATED; WAIT unless you have a strong reason to EXIT_ETH.`
-            : `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc} (ladder ${state.desk.ladder_mult_now}x, realized ${state.desk.realized_pnl_usdc} vs hold-hurdle ${state.desk.hold_hurdle_usdc}). ENTER_ETH only on a clean LONG setup worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`);
+            : `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc} (ladder ${state.desk.ladder_mult_now}x, realized ${state.desk.realized_pnl_usdc} vs hold-hurdle ${state.desk.hold_hurdle_usdc}, PF ${state.desk.profit_factor} over ${state.desk.desk_trades} trades). ENTER_ETH only on a clean LONG setup worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`);
     }
     // Eval entry directive: the code owns exits, so the LLM's only eval job is a clean LONG entry.
     if (state.eval.active && !state.eval.passed && !state.eval.in_virtual_trade) {

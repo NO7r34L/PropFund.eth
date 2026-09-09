@@ -12,9 +12,11 @@ pragma solidity 0.8.26;
 //                MIN_PROFIT_FACTOR_BPS (12000 = gross wins >= 1.2x gross losses), STALE_AFTER (300)
 //                Allocation ladder (bps of BASE_ALLOCATION of realized desk PnL):
 //                SCALE_T2_BPS (2000 = $100 -> 2x), SCALE_T4_BPS (5000 = $250 -> 4x),
-//                SCALE_T8_BPS (12000 = $600 -> 8x), SCALE_MIN_TRADES (40 closed desk trades for 2x,
-//                80 for 4x, 120 for 8x), MAX_ALLOCATION_MULT (8), ALPHA_MARGIN_BPS (0; margin over
-//                buy-and-hold to scale). Defaults are the ones analysis/desk_sim.py validated.
+//                SCALE_T8_BPS (12000 = $600 -> 8x); win-ratio gate per tier as profit factor
+//                SCALE_PF_T2/T4/T8_BPS (13000 / 15000 / 18000 = gross wins 1.3x / 1.5x / 1.8x gross
+//                losses) over a sample floor SCALE_MIN_TRADES (20 closed desk trades, any frequency);
+//                MAX_ALLOCATION_MULT (8), ALPHA_MARGIN_BPS (0; margin over buy-and-hold to scale).
+//                Defaults are the ones analysis/desk_sim.py validated.
 //
 // Run (devnet):
 //   PRIVATE_KEY=0x... PROPFUND_LENS=0x... USDC=0x... PYTH=0xA2aa50... \
@@ -80,7 +82,10 @@ contract DeployDeskScript is Script {
             scaleT4Bps:     vm.envOr("SCALE_T4_BPS", uint256(5000)),
             scaleT8Bps:     vm.envOr("SCALE_T8_BPS", uint256(12_000)),
             maxAllocationMult: vm.envOr("MAX_ALLOCATION_MULT", uint256(8)),
-            scaleMinTrades: vm.envOr("SCALE_MIN_TRADES", uint256(40)),
+            scaleMinTrades: vm.envOr("SCALE_MIN_TRADES", uint256(20)),
+            scalePfT2Bps:   vm.envOr("SCALE_PF_T2_BPS", uint256(13_000)),
+            scalePfT4Bps:   vm.envOr("SCALE_PF_T4_BPS", uint256(15_000)),
+            scalePfT8Bps:   vm.envOr("SCALE_PF_T8_BPS", uint256(18_000)),
             alphaMarginBps: vm.envOr("ALPHA_MARGIN_BPS", uint256(0))
         }));
 

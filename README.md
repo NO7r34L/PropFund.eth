@@ -63,7 +63,9 @@ real capital behind a *sustained record* — never behind a single lucky pass.
 5. **Scale, then cash out** — On the desk, realized profit above your allocation splits
    agent/firm and is swept. Your **allocation grows with your track record** (1× → 2× → 4× → 8×)
    — but only for realized profit that beats simply holding ETH since you were admitted, and only
-   over a real number of closed desk trades; beta is not paid, timing is. Your earned share is the
+   on a **win ratio**: gross wins ÷ gross losses ≥ 1.3 / 1.5 / 1.8 per tier over a small sample of
+   closed trades. Size-weighted, so it can't be gamed with tiny targets; frequency-independent, so an
+   agent trading fifty times a day is judged on quality, not the calendar. Beta is not paid, timing is. Your earned share is the
    collateral for the bigger book and is released as you scale down or resign. Breach the drawdown
    floor and the book closes and your deposit is forfeited — and anyone can liquidate a breached
    open book.
@@ -153,7 +155,7 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
 | `src/PropFundRouter.sol` | **Optional** atomic-update periphery. Folds the Pyth update into the trade (one tx) via the delegation system. Stateless, custody-free; the immutable core is untouched. See [DESIGN.md](./DESIGN.md#atomic-update-router-periphery) |
-| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool. Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold across a track record of closed trades, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
+| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool. Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold, gated on the agent's profit factor (win ratio weighted by size) per tier, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
 | `analysis/desk_sim.py` | 1000-agent, four-regime simulation of the desk's exact mechanics (flat vs ladder, exit-manager shapes). The numbers behind the deployed defaults |
 | **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands a signed VAA on-chain (or the router applies it atomically with the trade). Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
 | **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |
@@ -302,10 +304,14 @@ anti-skill) through the contract's exact mechanics across bull / bear / chop / m
 things moved the firm from a wash (+0.3–1.0%/yr, almost entirely forfeited deposits netting
 against book losses) to +6–10%/yr in every regime: an **asymmetric exit manager** in the agent
 (stop 1.5% / target 6% / wide trail / week time-stop — the old 3%/2% shape needed ~64% accuracy just
-to cover friction and left even skilled agents net negative), and a ladder that scales **track
-records, not lucky trades** (per-tier trade minimums; without them the ladder scaled noise as
-often as skill and cost the firm money). The absolute numbers are a model, not a forecast; the
-ranking of the choices is what held across regimes.
+to cover friction and left even skilled agents net negative), and a ladder gated on **win ratio,
+not trade count** (profit factor per tier over a 20-trade sample floor). A count gate assumes
+trades are scarce; agents trade many times a day, and in the sim a 40/80/120-trade gate only
+delayed proven winners — 0 agents reached 8× on weekly holds — while buying no precision (every
+gate lands at 13–20%, because a modest edge isn't detectable in a hundred trades). The firm's real
+protection at scale is the collateral rule: a scaled agent's downside is its own reinvested
+winnings. The absolute numbers are a model, not a forecast; the ranking of the choices is what
+held across regimes and frequencies.
 
 ## Use it as an agent skill
 
