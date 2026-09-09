@@ -17,6 +17,11 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 ///             Its only actions are enterEth (all-in to WETH) and exitEth (all-out to USDC) through
 ///             one deep spot pool. 1x, long-only. No leverage means no liquidation engine, no
 ///             funding, no margin — the only risk is ETH price, bounded by the drawdown rule.
+///           - EVERY ENTRY IS A BRACKET ORDER. enterEth takes a take-profit and a stop-loss at the
+///             same moment, both within a bounded distance of the entry price (MAX_TARGET_BPS /
+///             MAX_STOP_BPS), and the position has a hard maximum age (MAX_HOLD). Anyone can
+///             executeExit a book whose bracket or clock has hit — the agent cannot "just hold".
+///             The bracket may only be tightened afterwards (trailing), never widened.
 ///           - Realized profit above the allocation splits agent/firm and is swept, so the
 ///             book stays at its allocation. Losses shrink the book; breach the drawdown floor and
 ///             the book is closed, the agent's deposit forfeited. Anyone can liquidate an open
@@ -66,6 +71,12 @@ contract AgentDesk {
     error NotLiquidatable();
     error StaleOracle();
     error NothingToClaim();
+    /// @notice Bracket missing, inverted, or outside MAX_STOP_BPS / MAX_TARGET_BPS of entry.
+    error BadBracket();
+    /// @notice Bracket update may only tighten (raise the stop, lower the target).
+    error BracketWidened();
+    /// @notice executeExit: neither take-profit, stop-loss nor max-hold has hit.
+    error NotExecutable();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -77,7 +88,10 @@ contract AgentDesk {
     event PauseSet(bool paused);
     event Preapproved(address indexed agent, bool approved);
     event Admitted(address indexed agent, uint256 allocation, uint256 deposit, bool viaLens, uint256 benchPrice);
-    event Entered(address indexed agent, uint256 usdcIn, uint256 ethOut);
+    event Entered(address indexed agent, uint256 usdcIn, uint256 ethOut, uint64 entryPrice, uint64 tpPrice, uint64 slPrice);
+    event BracketUpdated(address indexed agent, uint64 tpPrice, uint64 slPrice);
+    /// @notice A keeper (or the agent) closed the book on its bracket: 1 = take-profit, 2 = stop-loss, 3 = max hold.
+    event BracketExecuted(address indexed agent, address indexed executor, uint8 reason, uint256 mark);
     event Exited(address indexed agent, uint256 ethIn, uint256 usdcOut, int256 pnl, uint256 agentCut, uint256 firmCut, int256 cumPnl);
     /// @notice Allocation changed. `hurdle` is the buy-and-hold profit the agent had to beat.
     event Scaled(address indexed agent, uint256 oldAllocation, uint256 newAllocation, uint256 mult, int256 cumPnl, int256 hurdle);
@@ -117,6 +131,12 @@ contract AgentDesk {
     uint256 public immutable MIN_PROFIT_FACTOR_BPS;
     /// @notice Pyth freshness window for marking an open ETH book.
     uint256 public immutable STALE_AFTER;
+    /// @notice Bracket bounds: the stop may sit at most this far below entry, the target at most
+    ///         this far above (bps of entry price). A stop farther than the drawdown floor is pointless.
+    uint256 public immutable MAX_STOP_BPS;
+    uint256 public immutable MAX_TARGET_BPS;
+    /// @notice Hard maximum age of an ETH position (seconds). Past it, anyone can executeExit.
+    uint256 public immutable MAX_HOLD;
 
     /// @notice Allocation ladder: realized desk PnL (as bps of BASE_ALLOCATION) that unlocks 2x/4x/8x.
     uint256 public immutable SCALE_T2_BPS;
@@ -162,6 +182,13 @@ contract AgentDesk {
         uint256 grossLoss;    // Σ |negative pnl|
     }
 
+    /// @notice The mandatory bracket on an open ETH book (zeroed while in USDC).
+    struct Bracket {
+        uint64 entryPrice;    // Pyth ETH/USD (1e8) at entry — the bracket's reference
+        uint64 tpPrice;       // take-profit: executeExit when mark >= this
+        uint64 slPrice;       // stop-loss:   executeExit when mark <= this
+    }
+
     /// @notice Firm USDC not allocated to any book.
     uint256 public firmIdle;
     /// @notice Firm's earned share of realized profits (+ forfeited deposits). Owner pulls.
@@ -169,6 +196,7 @@ contract AgentDesk {
     bool public paused;
 
     mapping(address => Book) public books;
+    mapping(address => Bracket) public brackets;
     /// @notice Agent's withdrawable profit share (pull-pattern). Also the source of extra
     ///         collateral when a book scales up.
     mapping(address => uint256) public earned;
@@ -215,6 +243,9 @@ contract AgentDesk {
         uint256 minTrades;
         uint256 minProfitFactorBps;
         uint256 staleAfter;
+        uint256 maxStopBps;
+        uint256 maxTargetBps;
+        uint256 maxHold;
         uint256 scaleT2Bps;
         uint256 scaleT4Bps;
         uint256 scaleT8Bps;
@@ -236,6 +267,7 @@ contract AgentDesk {
         // The base tier must be fully collateralized: a blow-up at 1x makes the firm whole.
         if (c.agentDeposit < c.baseAllocation * c.maxDrawdownBps / 10_000) revert BadConfig();
         if (c.maxAllocationMult == 0 || c.maxAllocationMult > 8) revert BadConfig();
+        if (c.maxStopBps == 0 || c.maxStopBps > c.maxDrawdownBps || c.maxTargetBps == 0 || c.maxHold == 0) revert BadConfig();
         if (!(c.scaleT2Bps < c.scaleT4Bps && c.scaleT4Bps < c.scaleT8Bps)) revert BadConfig();
         if (!(c.scalePfT2Bps <= c.scalePfT4Bps && c.scalePfT4Bps <= c.scalePfT8Bps)) revert BadConfig();
         OWNER = c.owner;
@@ -253,6 +285,9 @@ contract AgentDesk {
         MIN_TRADES = c.minTrades;
         MIN_PROFIT_FACTOR_BPS = c.minProfitFactorBps;
         STALE_AFTER = c.staleAfter;
+        MAX_STOP_BPS = c.maxStopBps;
+        MAX_TARGET_BPS = c.maxTargetBps;
+        MAX_HOLD = c.maxHold;
         SCALE_T2_BPS = c.scaleT2Bps;
         SCALE_T4_BPS = c.scaleT4Bps;
         SCALE_T8_BPS = c.scaleT8Bps;
@@ -363,22 +398,64 @@ contract AgentDesk {
                                  TRADING
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice All-in: swap the whole USDC book to WETH. The one entry an agent can make.
-    function enterEth(uint256 minOut) external nonReentrant {
+    /// @notice All-in: swap the whole USDC book to WETH, with a MANDATORY bracket set at the same
+    ///         moment. `tpPrice`/`slPrice` are Pyth-scale (1e8) ETH/USD prices; the entry reference
+    ///         is the fresh Pyth spot at this call. Bounds: slPrice ≥ spot × (1 − MAX_STOP_BPS),
+    ///         tpPrice ≤ spot × (1 + MAX_TARGET_BPS), slPrice < spot < tpPrice.
+    function enterEth(uint256 minOut, uint64 tpPrice, uint64 slPrice) external nonReentrant {
         if (paused) revert Paused();
         Book storage b = books[msg.sender];
         if (!b.active) revert NotActive();
         if (b.eth != 0) revert InEth();
         uint256 amountIn = b.usdc;
         if (amountIn == 0) revert ZeroAmount();
+        (uint256 spot, bool fresh) = _ethSpot();
+        if (!fresh) revert StaleOracle();
+        _checkBracket(spot, tpPrice, slPrice);
 
         b.usdc = 0;  // effects before the external swap
         b.entryUsdc = amountIn;
         b.entryTime = uint64(block.timestamp);
+        brackets[msg.sender] = Bracket({ entryPrice: uint64(spot), tpPrice: tpPrice, slPrice: slPrice });
         USDC.approve(address(VENUE), amountIn);
         uint256 out = VENUE.swapExactIn(address(USDC), address(WETH), amountIn, minOut, address(this));
         b.eth = out;
-        emit Entered(msg.sender, amountIn, out);
+        emit Entered(msg.sender, amountIn, out, uint64(spot), tpPrice, slPrice);
+    }
+
+    /// @notice Tighten the bracket on an open book: raise the stop and/or lower the target
+    ///         (a trailing stop). Widening is impossible — the risk you entered with is the most
+    ///         risk you can ever hold.
+    function updateBracket(uint64 tpPrice, uint64 slPrice) external {
+        Book storage b = books[msg.sender];
+        if (!b.active) revert NotActive();
+        if (b.eth == 0) revert InUsdc();
+        Bracket storage k = brackets[msg.sender];
+        if (tpPrice > k.tpPrice || slPrice < k.slPrice) revert BracketWidened();
+        if (slPrice >= tpPrice) revert BadBracket();
+        k.tpPrice = tpPrice;
+        k.slPrice = slPrice;
+        emit BracketUpdated(msg.sender, tpPrice, slPrice);
+    }
+
+    /// @notice Permissionless: close an open book whose take-profit or stop-loss has been hit at
+    ///         the fresh Pyth mark, or whose position is older than MAX_HOLD. Settles exactly like
+    ///         the agent's own exit (split / loss / ladder) — this is the bracket doing its job,
+    ///         not a penalty. Fill bounded to within 2% of the mark.
+    function executeExit(address agent) external nonReentrant {
+        Book storage b = books[agent];
+        if (!b.active) revert NotActive();
+        if (b.eth == 0) revert InUsdc();
+        (uint8 reason, uint256 spot) = _exitReason(b, brackets[agent]);
+        if (reason == 0) revert NotExecutable();
+        uint256 ethIn = b.eth;
+        uint256 mark = ethIn * spot / ETH_PRICE_TO_USDC;
+        b.eth = 0;
+        uint256 minOut = mark * (10_000 - LIQ_SLIPPAGE_BPS) / 10_000;
+        WETH.approve(address(VENUE), ethIn);
+        uint256 out = VENUE.swapExactIn(address(WETH), address(USDC), ethIn, minOut, address(this));
+        emit BracketExecuted(agent, msg.sender, reason, mark);
+        _settle(agent, b, ethIn, out);
     }
 
     /// @notice All-out: swap the whole WETH book back to USDC and settle. Profit above the
@@ -449,6 +526,7 @@ contract AgentDesk {
         _record(b, pnl);
         b.entryUsdc = 0;
         b.entryTime = 0;
+        delete brackets[agent];
         uint256 profit; uint256 agentCut; uint256 firmCut;
         if (usdcOut > b.allocation) {
             profit = usdcOut - b.allocation;
@@ -463,6 +541,29 @@ contract AgentDesk {
         emit Exited(agent, ethIn, usdcOut, pnl, agentCut, firmCut, b.cumPnl);
         if (b.usdc <= _floor(b)) { _revoke(agent, b, true); return; }
         _rebalance(agent, b);
+    }
+
+    /// @dev Bracket validity against the entry reference price.
+    function _checkBracket(uint256 spot, uint64 tpPrice, uint64 slPrice) internal view {
+        if (slPrice == 0 || tpPrice == 0 || slPrice >= spot || tpPrice <= spot) revert BadBracket();
+        if (spot - slPrice > spot * MAX_STOP_BPS / 10_000) revert BadBracket();
+        if (tpPrice - spot > spot * MAX_TARGET_BPS / 10_000) revert BadBracket();
+    }
+
+    /// @dev Why an open book can be executed right now: 0 none, 1 take-profit, 2 stop-loss,
+    ///      3 max hold. Price reasons need a fresh mark; the clock does not.
+    function _exitReason(Book storage b, Bracket storage k) internal view returns (uint8 reason, uint256 spot) {
+        bool fresh;
+        (spot, fresh) = _ethSpot();
+        if (fresh) {
+            if (spot >= k.tpPrice) return (1, spot);
+            if (spot <= k.slPrice) return (2, spot);
+        }
+        if (block.timestamp - b.entryTime >= MAX_HOLD) {
+            if (!fresh) revert StaleOracle();   // still need a mark to bound the fill
+            return (3, spot);
+        }
+        return (0, spot);
     }
 
     /// @dev Book the realized result of one closed trade into the record the ladder reads.
@@ -546,6 +647,7 @@ contract AgentDesk {
         b.deposit = 0;
         b.entryUsdc = 0;
         b.entryTime = 0;
+        delete brackets[agent];
         firmIdle += returned;
         if (forfeit) {
             firmProfit += dep;
@@ -597,6 +699,18 @@ contract AgentDesk {
     /// @notice Drawdown floor for `agent`'s book.
     function drawdownFloor(address agent) external view returns (uint256) {
         return _floor(books[agent]);
+    }
+
+    /// @notice Why `agent`'s open book can be executed now (0 none, 1 TP, 2 SL, 3 max hold).
+    function exitReason(address agent) external view returns (uint8) {
+        Book storage b = books[agent];
+        if (!b.active || b.eth == 0) return 0;
+        Bracket storage k = brackets[agent];
+        (uint256 spot, bool fresh) = _ethSpot();
+        if (fresh && spot >= k.tpPrice) return 1;
+        if (fresh && spot <= k.slPrice) return 2;
+        if (block.timestamp - b.entryTime >= MAX_HOLD) return 3;
+        return 0;
     }
 
     /// @notice True if `agent` holds an open ETH book that a keeper can liquidate right now.

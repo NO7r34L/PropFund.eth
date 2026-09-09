@@ -214,8 +214,9 @@ if __name__ == "__main__":
     import sys
     print(f"AgentDesk, {N_AGENTS} agents, ${FIRM_CAPITAL:,.0f} firm capital, base ${BASE:.0f}, dd {MAX_DD:.0%}, split {SPLIT:.0%}, friction {FRICTION:.2%}/round-trip")
     print("skill: 85% noise / 10% edge (rho~0.15) / 5% anti-skill. firm %/yr is ANNUALIZED. Gate = what unlocks a ladder tier.\n")
-    EXIT = dict(sl=0.015, tp=0.06, trail=(0.03, 0.015))
-    FREQS = [("HIGH-FREQ (~100 trades/yr)", dict(hold_days=1, trade_every=1)), ("weekly holds (~25/yr)", dict(hold_days=7, trade_every=3))]
+    # DEPLOYED: bracket fixed at entry (stop 1.5% / target 6%), on-chain MAX_HOLD 24h -> hold_days=1
+    EXIT = dict(sl=0.015, tp=0.06, trail=(None, None))
+    FREQS = [("DEPLOYED: bracket + 1-day max hold", dict(hold_days=1, trade_every=1)), ("week-long holds (pre-bracket)", dict(hold_days=7, trade_every=3))]
     GATES = [("count 40/80/120 (PR #39)",         dict(min_trades=(40, 80, 120))),
              ("no gate",                          dict(min_trades=(0, 0, 0))),
              ("DEPLOYED: PF 1.3/1.5/1.8, sample 20", dict(pf_tiers=PF_TIERS, min_sample=MIN_SAMPLE)),

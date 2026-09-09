@@ -71,15 +71,17 @@ const EVAL_DRAWDOWN_FAIL_BPS = 500;
 // owns the exit, the LLM owns the entry. The stop MUST sit well inside the desk's drawdown floor
 // (MAX_DRAWDOWN_BPS below allocation, 10% by default) — a keeper liquidation there FORFEITS the
 // agent's deposit, so we always exit ourselves first.
-// The shape is ASYMMETRIC on purpose: risk 1.5 to make 6, trail wide, hold up to a week. The old
-// SL 3 / TP 2 needed ~64% accuracy just to cover friction and left even skilled agents net
-// negative in analysis/desk_sim.py (1000 agents, four regimes); this shape was the best of the
-// sweep in every regime. Round-trip venue cost is ~0.17%.
+// EVERY DESK ENTRY IS A BRACKET ORDER, ON-CHAIN: enterEth takes tp + sl at the same moment, the
+// contract bounds them (MAX_STOP_BPS / MAX_TARGET_BPS of entry) and force-exits after MAX_HOLD, and
+// anyone can executeExit when the bracket or the clock hits. The LLM chooses the bracket (like
+// OPEN_TRADE); these are the defaults the code fills in when it doesn't, clamped to the bounds.
+// Shape is ASYMMETRIC on purpose: risk 1.5 to make 6. In analysis/desk_sim.py a fixed bracket with a
+// 1-day max hold beat week-long holds 4-6x. The trail tightens the stop on-chain (updateBracket can
+// only tighten). Round-trip venue cost is ~0.17%.
 const DESK_TP_PCT = Number(process.env.DESK_TP_PCT || 6.0);
 const DESK_TRAIL_ARM_PCT = Number(process.env.DESK_TRAIL_ARM_PCT || 3.0);
 const DESK_TRAIL_GIVEBACK_PCT = Number(process.env.DESK_TRAIL_GIVEBACK_PCT || 1.5);
 const DESK_SL_PCT = Number(process.env.DESK_SL_PCT || 1.5);
-const DESK_MAX_HOLD_HOURS = Number(process.env.DESK_MAX_HOLD_HOURS || 168);   // time-stop: a week with no result frees the book
 const DESK_SLIPPAGE_BPS = Number(process.env.DESK_SLIPPAGE_BPS || 100);   // minOut tolerance vs live spot
 const DESK_CLAIM_MIN_USDC = Number(process.env.DESK_CLAIM_MIN_USDC || 25); // auto-claim threshold once the ladder is capped                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
@@ -168,7 +170,7 @@ ACTIONS REFERENCE (the FULL set — but only a subset is legal each tick. Each u
 - {"action": "WITHDRAW_PROFIT", "args": {"amount_usdc": "<decimal>"}}
 - {"action": "RESIGN"} — exit funded status
 - {"action": "DESK_ADMIT"} — GRADUATE. Offered only when state.desk.qualifies=true (your PropFund probation record clears the desk bar). Posts the deposit and admits you to the REAL desk.
-- {"action": "ENTER_ETH"} — desk only: swap your WHOLE USDC book into ETH (real 1x spot, one pool). Exits are AUTOMATED in code (stop 1.5% / take-profit 6% / trailing / week time-stop / floor-guard) — the shape rewards catching a real move, so enter only on a setup you expect to run several percent. Round-trip venue cost is ~0.17%. Do NOT churn.
+- {"action": "ENTER_ETH", "args": {"tp": "<price decimal>", "sl": "<price decimal>"}} — desk only: swap your WHOLE USDC book into ETH (real 1x spot, one pool) as a BRACKET ORDER. tp AND sl are set at entry and enforced ON-CHAIN; bounds: sl within state.desk.bracket_bounds.max_stop_pct below spot, tp within max_target_pct above, and the position is force-closed after max_hold_hours regardless. Anyone can execute your bracket the moment it hits. Defaults if omitted: stop 1.5% / target 6%. The bracket can only be TIGHTENED afterwards (the code trails the stop). Round-trip venue cost is ~0.17%. Do NOT churn.
 - {"action": "EXIT_ETH"} — desk only: swap the whole ETH book back to USDC now. The automated exit normally handles this; use only with a strong reason.
 
 DESK PHASE (state.desk.admitted=true): you have GRADUATED from virtual probation to a real book of the
@@ -176,7 +178,8 @@ firm's capital. PropFund probation entries are over. Your only job is timing ONE
 whole book — you are either in USDC or in ETH. The book has a hard drawdown floor
 (state.desk.drawdown_floor_usdc): if its marked value reaches it, a keeper liquidates you and your
 deposit is FORFEITED. The code's automated stop is set well inside that floor — let it work; never
-hold through a loss hoping. Your ALLOCATION SCALES (1x → 2x → 4x → 8x) with REALIZED profit — gated on
+hold through a loss hoping. You cannot sit in ETH: every entry carries an on-chain take-profit, stop-loss
+and max-hold, executed by anyone. Your ALLOCATION SCALES (1x → 2x → 4x → 8x) with REALIZED profit — gated on
 your WIN RATIO as profit factor (gross wins / gross losses ≥ 1.3 / 1.5 / 1.8 per tier, over a small sample
 of closed trades) and only when that profit beats what simply holding ETH since your admission would have
 made (state.desk.hold_hurdle_usdc). Beta is not paid; timing is. Profit factor is size-weighted, so a high
@@ -307,11 +310,13 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
     // graduation (desk) in one state object. Only when a desk is wired.
     let desk = null;
     if (DESK) {
-        const [bk, bv, floor, liq, qual, earnedRaw, dep, lad, baseAlloc, maxMult, wr, sampleFloor] = await Promise.all([
+        const [bk, bv, floor, liq, qual, earnedRaw, dep, lad, baseAlloc, maxMult, wr, sampleFloor, br, exitR, maxStop, maxTarget, maxHold] = await Promise.all([
             DESK.getBook(me), DESK.bookValue(me), DESK.drawdownFloor(me), DESK.isLiquidatable(me),
             DESK.qualifies(me), DESK.earned(me), DESK.AGENT_DEPOSIT(), DESK.ladder(me),
             DESK.BASE_ALLOCATION(), DESK.MAX_ALLOCATION_MULT(), DESK.winRatio(me), DESK.SCALE_MIN_TRADES(),
+            DESK.brackets(me), DESK.exitReason(me), DESK.MAX_STOP_BPS(), DESK.MAX_TARGET_BPS(), DESK.MAX_HOLD(),
         ]);
+        const EXIT_REASON = ['none', 'take-profit', 'stop-loss', 'max-hold'];
         const pfBps = wr.profitFactorBps ?? wr[0];
         const inEth = bk.eth > 0n;
         const markFresh = Boolean(bv.fresh ?? bv[1]);
@@ -340,6 +345,8 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
                 win_rate: `${(Number(wr.winRateBps ?? wr[1]) / 100).toFixed(1)}%`,
                 profit_factor: pfBps >= 2n ** 128n ? 'inf' : (Number(pfBps) / 10_000).toFixed(2),
                 ladder_sample_floor_trades: Number(sampleFloor),
+                // Bracket bounds the contract enforces on ENTER_ETH (tp/sl are mandatory, set at entry).
+                bracket_bounds: { max_stop_pct: Number(maxStop) / 100, max_target_pct: Number(maxTarget) / 100, max_hold_hours: Number(maxHold) / 3600 },
                 // Allocation ladder: the book grows only on realized alpha over holding ETH since admission.
                 ladder_mult_now: Number(lad.mult ?? lad[0]),
                 hold_hurdle_usdc: formatUnits(lad.hurdle ?? lad[1], 6),
@@ -353,6 +360,10 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
                 ...(inEth ? {
                     entry_value_usdc: entry != null ? entry.toFixed(4) : null,
                     held_hours: heldHours,
+                    entry_price: formatUnits(br.entryPrice ?? br[0], 8),
+                    tp_price: formatUnits(br.tpPrice ?? br[1], 8),
+                    sl_price: formatUnits(br.slPrice ?? br[2], 8),
+                    exit_reason_now: EXIT_REASON[Number(exitR)] ?? 'none',
                     unrealized_return: unreal != null ? `${unreal >= 0 ? '+' : ''}${unreal.toFixed(3)}%` : 'unknown (stale mark)',
                     unrealized_return_value: unreal,
                 } : {}),
@@ -741,26 +752,46 @@ function evalExitDecision(state) {
     return null;
 }
 
-// Deterministic exit for the desk's real ETH book. Mirrors evalExitDecision, plus a hard
-// floor-guard: the keeper's liquidation forfeits the deposit, so we exit before it can fire.
+// Deterministic management of the desk's open ETH book. Take-profit, stop-loss and max-hold
+// live ON-CHAIN in the bracket set at entry (any keeper can executeExit them). What's left for the
+// agent's code: (1) execute its own bracket the moment it hits — don't wait for a keeper;
+// (2) trail: tighten the on-chain stop as the trade works (updateBracket can only tighten);
+// (3) floor-guard: a keeper LIQUIDATION (drawdown floor) forfeits the deposit, so exit first.
+// Returns { action, reason, args? } or null.
 function deskExitDecision(state) {
     const d = state.desk;
-    if (!d?.mark_fresh || d?.unrealized_return_value == null) return null;   // never exit on a stale mark
+    if (!d?.mark_fresh || d?.unrealized_return_value == null) return null;   // never act on a stale mark
+    if (d.exit_reason_now && d.exit_reason_now !== 'none') {
+        return { action: 'DESK_EXECUTE_EXIT', reason: `bracket hit on-chain: ${d.exit_reason_now}` };
+    }
     const r = d.unrealized_return_value;
-    const peak = STATE.deskPeakR ?? r;
-    if (r >= DESK_TP_PCT) return `desk take-profit +${r.toFixed(2)}% >= ${DESK_TP_PCT}%`;
-    if (peak >= DESK_TRAIL_ARM_PCT && r > 0 && r <= peak - DESK_TRAIL_GIVEBACK_PCT) {
-        return `desk trailing-stop: peaked +${peak.toFixed(2)}%, now +${r.toFixed(2)}%`;
-    }
-    if (r <= -DESK_SL_PCT) return `desk stop-loss ${r.toFixed(2)}% <= -${DESK_SL_PCT}%`;
-    if (d.held_hours != null && d.held_hours >= DESK_MAX_HOLD_HOURS) {
-        return `desk time-stop: held ${d.held_hours.toFixed(1)}h >= ${DESK_MAX_HOLD_HOURS}h at ${r >= 0 ? '+' : ''}${r.toFixed(2)}%`;
-    }
     const value = Number(d?.book_value_usdc), floor = Number(d?.drawdown_floor_usdc);
     if (value > 0 && floor > 0 && value <= floor * 1.01) {
-        return `desk floor-guard: marked ${value.toFixed(2)} within 1% of liquidation floor ${floor.toFixed(2)}`;
+        return { action: 'EXIT_ETH', reason: `desk floor-guard: marked ${value.toFixed(2)} within 1% of liquidation floor ${floor.toFixed(2)}` };
+    }
+    const peak = STATE.deskPeakR ?? r;
+    if (peak >= DESK_TRAIL_ARM_PCT && r > 0) {
+        // Trail the on-chain stop to (peak - giveback) — only when that is above the current stop.
+        const entryPx = Number(d.entry_price), curSl = Number(d.sl_price), curTp = Number(d.tp_price);
+        const trailPx = entryPx * (1 + (peak - DESK_TRAIL_GIVEBACK_PCT) / 100);
+        if (entryPx > 0 && trailPx > curSl * 1.001 && trailPx < curTp) {
+            return { action: 'DESK_UPDATE_BRACKET', reason: `trail: peaked +${peak.toFixed(2)}%, stop -> ${trailPx.toFixed(2)}`,
+                     args: { tp: curTp, sl: trailPx } };
+        }
     }
     return null;
+}
+
+// Bracket for ENTER_ETH: the LLM's tp/sl if given, else the code's asymmetric defaults; both
+// clamped to the contract's bounds around the live spot. Returns Pyth-scale (1e8) BigInts.
+function deskBracket(spot, args, bounds) {
+    const maxStop = (bounds?.max_stop_pct ?? 3) / 100, maxTarget = (bounds?.max_target_pct ?? 10) / 100;
+    let tp = Number(args?.tp) > 0 ? Number(args.tp) : spot * (1 + DESK_TP_PCT / 100);
+    let sl = Number(args?.sl) > 0 ? Number(args.sl) : spot * (1 - DESK_SL_PCT / 100);
+    tp = Math.min(tp, spot * (1 + maxTarget) * 0.999);
+    sl = Math.max(sl, spot * (1 - maxStop) * 1.001);
+    if (!(sl < spot && spot < tp)) { tp = spot * (1 + DESK_TP_PCT / 100); sl = spot * (1 - DESK_SL_PCT / 100); }
+    return { tp: BigInt(Math.round(tp * 1e8)), sl: BigInt(Math.round(sl * 1e8)), tpUsd: tp, slUsd: sl };
 }
 
 function computeValidActions(state) {
@@ -1215,9 +1246,23 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
                     const priceE8 = BigInt(Math.round(spot * 1e8));
                     minOut = bk.usdc * 10n ** 20n / priceE8 * BigInt(10_000 - DESK_SLIPPAGE_BPS) / 10_000n;
                 }
-                tx = await DESK.enterEth(minOut);
+                if (!(spot && spot > 0)) return { ok: false, action: action.action, error: 'no live spot for the bracket' };
+                const br = deskBracket(spot, action.args, state?.desk?.bracket_bounds);
+                tx = await DESK.enterEth(minOut, br.tp, br.sl);
+                action.args = { ...(action.args ?? {}), tp: br.tpUsd.toFixed(2), sl: br.slUsd.toFixed(2) };
                 STATE.deskEntryUsdc = Number(formatUnits(bk.usdc, 6));
                 STATE.deskPeakR = 0;
+                saveDeskState();
+                break;
+            }
+            case 'DESK_UPDATE_BRACKET': {
+                tx = await DESK.updateBracket(BigInt(Math.round(Number(action.args.tp) * 1e8)), BigInt(Math.round(Number(action.args.sl) * 1e8)));
+                break;
+            }
+            case 'DESK_EXECUTE_EXIT': {
+                tx = await DESK.executeExit(wallet.address);
+                STATE.deskEntryUsdc = null;
+                STATE.deskPeakR = null;
                 saveDeskState();
                 break;
             }
@@ -1322,15 +1367,18 @@ async function tick(ctx) {
         const r = state.desk.unrealized_return_value;
         STATE.deskPeakR = STATE.deskPeakR === null ? r : Math.max(STATE.deskPeakR, r);
         saveDeskState();
-        const reason = deskExitDecision(state);
-        if (reason) {
-            const result = await executeAction({ action: 'EXIT_ETH', reasoning: reason }, propfund, usdc, wallet, state, ctx.net, ctx.router);
-            log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'desk-exit-ok' : 'desk-exit-failed', { reason, ...result });
-            pushHistory('EXIT_ETH', null, result, reason);
+        const dec = deskExitDecision(state);
+        if (dec) {
+            const result = await executeAction({ action: dec.action, args: dec.args, reasoning: dec.reason }, propfund, usdc, wallet, state, ctx.net, ctx.router);
+            const ev = dec.action === 'DESK_UPDATE_BRACKET' ? 'desk-trail' : 'desk-exit';
+            log(result.ok ? 'EXEC' : 'ERROR', result.ok ? `${ev}-ok` : `${ev}-failed`, { reason: dec.reason, ...result });
+            pushHistory(dec.action, dec.args ?? null, result, dec.reason);
         } else {
             log('EXEC', 'desk-hold', {
                 unrealized: state.desk.unrealized_return,
                 peak: STATE.deskPeakR != null ? `${STATE.deskPeakR.toFixed(3)}%` : null,
+                bracket: `${state.desk.sl_price} / ${state.desk.entry_price} / ${state.desk.tp_price}`,
+                held_h: state.desk.held_hours != null ? Number(state.desk.held_hours.toFixed(1)) : null,
                 book_value: state.desk.book_value_usdc, floor: state.desk.drawdown_floor_usdc,
                 allocation: state.desk.allocation_usdc, ladder: state.desk.ladder_mult_now,
                 keeper_liquidatable: state.desk.liquidatable_by_keeper,

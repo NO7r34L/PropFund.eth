@@ -5,8 +5,9 @@
 //   2. executeExit() any position whose TP/SL has hit at the current oracle price
 //   3. forceClose() any position older than MAX_POSITION_BLOCKS (~14d)
 //   4. processFundingQueue() when capacity exists and the queue isn't empty
-//   5. AgentDesk.liquidate() any graduated agent whose open ETH book has breached its
-//      drawdown floor (only when a desk is wired for the network)
+//   5. AgentDesk.executeExit() any graduated agent whose open ETH book has hit its on-chain
+//      bracket (take-profit / stop-loss) or its max hold; AgentDesk.liquidate() any book that
+//      has breached its drawdown floor (only when a desk is wired for the network)
 //
 // Runs as either a daemon (`keeper run`) or a one-shot pass (`keeper sweep`).
 // Failed txs are logged and skipped — racing keepers are expected.
@@ -107,12 +108,20 @@ async function detectWork(propfund, json) {
 // Desk detection: walk the desk's agent list; the contract's isLiquidatable() view does the
 // marking (fresh Pyth + conf guards), so this is one read per agent, no client-side price math.
 async function detectDeskWork(desk) {
-    if (!desk) return { deskLiquidate: [], deskAgents: 0 };
+    if (!desk) return { deskLiquidate: [], deskExecExit: [], deskAgents: 0 };
     const count = await desk.agentCount();
     const agents = [];
     for (let i = 0n; i < count; i++) agents.push(await desk.agents(i));
-    const flags = await Promise.all(agents.map(a => desk.isLiquidatable(a)));
-    return { deskLiquidate: agents.filter((_, i) => flags[i]), deskAgents: agents.length };
+    const reads = await Promise.all(agents.map(async a => {
+        const [liq, reason] = await Promise.all([desk.isLiquidatable(a), desk.exitReason(a)]);
+        return { liq, reason: Number(reason) };
+    }));
+    // A breach outranks the bracket (it forfeits the deposit and must not be raced by a softer exit).
+    return {
+        deskLiquidate: agents.filter((_, i) => reads[i].liq),
+        deskExecExit: agents.filter((_, i) => !reads[i].liq && reads[i].reason !== 0),
+        deskAgents: agents.length,
+    };
 }
 
 // Action: send the tx for one work item, decode any revert, return a structured result.
@@ -124,6 +133,7 @@ async function actOne(propfund, kind, target, json) {
         else if (kind === 'forceClose') tx = await propfund.forceClose(target);
         else if (kind === 'processQueue') tx = await propfund.processFundingQueue(target);  // target = max
         else if (kind === 'deskLiquidate') tx = await propfund.liquidate(target);           // propfund = desk here
+        else if (kind === 'deskExecExit') tx = await propfund.executeExit(target);
         else throw new Error(`unknown kind ${kind}`);
 
         const receipt = await tx.wait();
@@ -151,7 +161,7 @@ async function tick({ propfund, desk, provider, wallet, network, dryRun, maxGasG
         return { skipped: 'gas-too-high', currentGwei, maxGasGwei };
     }
 
-    const [{ work, traders }, { deskLiquidate, deskAgents }] = await Promise.all([
+    const [{ work, traders }, { deskLiquidate, deskExecExit, deskAgents }] = await Promise.all([
         detectWork(propfund, json),
         detectDeskWork(desk),
     ]);
@@ -176,6 +186,7 @@ async function tick({ propfund, desk, provider, wallet, network, dryRun, maxGasG
             canFundNow,
             deskAgentsScanned: deskAgents,
             wouldDeskLiquidate: deskLiquidate,
+            wouldDeskExecExit: deskExecExit,
         };
     }
 
@@ -183,7 +194,7 @@ async function tick({ propfund, desk, provider, wallet, network, dryRun, maxGasG
     // liquidate / executeExit / forceClose all read spot — without a fresh push they'd see
     // whatever the cached on-chain price is, which can be minutes stale.
     let pythPushed = null;
-    const needsFreshPrice = work.liquidate.length + work.execExit.length + work.forceClose.length + deskLiquidate.length > 0;
+    const needsFreshPrice = work.liquidate.length + work.execExit.length + work.forceClose.length + deskLiquidate.length + deskExecExit.length > 0;
     if (needsFreshPrice && network) {
         try { pythPushed = await refreshPyth(propfund, network); }
         catch (e) {
@@ -200,6 +211,7 @@ async function tick({ propfund, desk, provider, wallet, network, dryRun, maxGasG
         ...work.forceClose.map(t => actOne(propfund, 'forceClose', t)),
         ...queueCandidates.map(max => actOne(propfund, 'processQueue', max)),
         ...deskLiquidate.map(a => actOne(desk, 'deskLiquidate', a)),
+        ...deskExecExit.map(a => actOne(desk, 'deskExecExit', a)),
     ];
     const results = actions.length > 0 ? await Promise.all(actions) : [];
 
@@ -234,6 +246,7 @@ function logTickSummary(net, summary) {
         const counts = `liq=${summary.wouldLiquidate.length} exit=${summary.wouldExecExit.length} force=${summary.wouldForceClose.length} queue=${summary.wouldProcessQueue ? 'yes' : 'no'} desk-liq=${summary.wouldDeskLiquidate.length}`;
         process.stdout.write(`[keeper:dry] ${summary.tradersScanned} traders + ${summary.deskAgentsScanned} desk agents scanned — ${counts}\n`);
         for (const t of summary.wouldDeskLiquidate) process.stdout.write(`  would desk-liquidate ${t}\n`);
+        for (const t of summary.wouldDeskExecExit)  process.stdout.write(`  would desk-exec-exit ${t}\n`);
         for (const t of summary.wouldLiquidate)  process.stdout.write(`  would liquidate ${t}\n`);
         for (const t of summary.wouldExecExit)   process.stdout.write(`  would exec-exit ${t}\n`);
         for (const t of summary.wouldForceClose) process.stdout.write(`  would force-close ${t}\n`);
