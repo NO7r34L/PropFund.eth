@@ -189,6 +189,7 @@ anyone ──executeExit(agent)──▶ mark ≥ tp | ≤ sl | age ≥ MAX_HOLD
            down: book excess → firmIdle; deposit excess → earned
 anyone ──liquidate(agent)──▶ open book marked at Pyth ≤ floor → forced exit (fill ≥ mark·0.98), revoke
 keeper ──sweep──▶ walks desk.agents: liquidate any isLiquidatable book, executeExit any exitReason ≠ 0 (same tick as PropFund's paths)
+borrower ──flashLoan(self, USDC, ≤ firmIdle)──▶ USDC out → onFlashLoan (desk locked) → amount+fee pulled back → fee → firmProfit
 ```
 
 Money never leaves the desk except: firm pulls idle / firm profit; agent pulls earned share or a

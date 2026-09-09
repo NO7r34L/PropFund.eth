@@ -12,6 +12,8 @@ import {MockWETH} from "./mocks/MockWETH.sol";
 import {MockPyth} from "./mocks/MockPyth.sol";
 import {MockSwap} from "./mocks/MockSwap.sol";
 import {MockLens} from "./mocks/MockLens.sol";
+import {MockFlashBorrower} from "./mocks/MockFlashBorrower.sol";
+import {IERC3156FlashLender} from "../src/interfaces/IERC3156.sol";
 
 contract AgentDeskTest is Test {
     bytes32 constant ETH_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
@@ -63,7 +65,7 @@ contract AgentDeskTest is Test {
             minTrades: 5,        // over at least 5 closed trades
             minProfitFactorBps: 12_000, // gross wins >= 1.2x gross losses
             staleAfter: 5 minutes,
-            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours, flashFeeBps: 5,
             scaleT2Bps: T2_BPS,
             scaleT4Bps: T4_BPS,
             scaleT8Bps: T8_BPS,
@@ -508,7 +510,7 @@ contract AgentDeskTest is Test {
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: 49e6, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
-            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours, flashFeeBps: 5,
             scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8, scaleMinTrades: 0, scalePfT2Bps: 0, scalePfT4Bps: 0, scalePfT8Bps: 0, alphaMarginBps: 0
         });
         vm.expectRevert(AgentDesk.BadConfig.selector);
@@ -523,7 +525,7 @@ contract AgentDeskTest is Test {
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: DEPOSIT, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
-            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours, flashFeeBps: 5,
             scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8,
             scaleMinTrades: 3, scalePfT2Bps: 15_000, scalePfT4Bps: 20_000, scalePfT8Bps: 30_000, alphaMarginBps: 0
         }));
@@ -689,6 +691,75 @@ contract AgentDeskTest is Test {
         pyth.setSpotE8(ETH_ID, 2750e8);                           // +10% target hit: cumPnl $50 -> scales
         vm.prank(keeper); desk.executeExit(agent);
         assertGt(_book(agent).allocation, ALLOC);
+    }
+
+    /*//////////////////////////// flash lending ////////////////////////////*/
+
+    function test_flash_lendsIdle_feeToFirmProfit_ledgerHolds() public {
+        _admit(agent);                                   // firmIdle = $9,500
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);                     // to pay the fee
+        assertEq(desk.maxFlashLoan(address(usdc)), 9_500e6);
+        assertEq(desk.flashFee(address(usdc), 9_500e6), 4.75e6);   // 5 bps
+        uint256 before = usdc.balanceOf(address(desk));
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 9_500e6);
+        assertEq(b.lastAmount(), 9_500e6); assertEq(b.lastFee(), 4.75e6);
+        assertEq(usdc.balanceOf(address(desk)), before + 4.75e6);
+        assertEq(desk.firmProfit(), 4.75e6);
+        assertEq(desk.firmIdle(), 9_500e6);              // capital untouched
+        AgentDesk.Book memory bk = _book(agent);
+        assertEq(usdc.balanceOf(address(desk)), desk.firmIdle() + bk.usdc + bk.deposit + desk.firmProfit() + desk.earned(agent));
+    }
+
+    function test_flash_neverLendsBooksDepositsOrProfit() public {
+        _admit(agent);
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        vm.expectRevert(AgentDesk.InsufficientIdle.selector);
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 9_500e6 + 1);   // one wei of the agent's book
+    }
+
+    function test_flash_shortRepay_reverts() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        b.setMode(MockFlashBorrower.Mode.ShortRepay);
+        vm.expectRevert();                               // safeTransferFrom of amount+fee fails on allowance
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 1_000e6);
+        assertEq(desk.firmIdle(), 10_000e6); assertEq(usdc.balanceOf(address(desk)), 10_000e6);
+    }
+
+    function test_flash_badCallbackReturn_reverts() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        b.setMode(MockFlashBorrower.Mode.BadReturn);
+        vm.expectRevert(AgentDesk.FlashCallbackFailed.selector);
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 1_000e6);
+    }
+
+    function test_flash_reentryIntoDesk_blocked() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        b.setMode(MockFlashBorrower.Mode.Reenter);
+        vm.expectRevert("reentry blocked");              // desk.claim() reverted Reentrancy inside the callback
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 1_000e6);
+    }
+
+    function test_flash_thirdPartyCannotInitiateForAReceiver() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        vm.prank(rando);
+        vm.expectRevert(AgentDesk.FlashInitiatorNotReceiver.selector);
+        desk.flashLoan(b, address(usdc), 1_000e6, "");
+    }
+
+    function test_flash_usdcOnly_andPauseBlocks() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        vm.expectRevert(AgentDesk.UnsupportedToken.selector);
+        b.borrow(IERC3156FlashLender(address(desk)), address(weth), 1e18);
+        vm.prank(firm); desk.setPaused(true);
+        assertEq(desk.maxFlashLoan(address(usdc)), 0);
+        vm.expectRevert(AgentDesk.Paused.selector);
+        b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 1_000e6);
     }
 
     /*//////////////////////////// accounting invariant ////////////////////////////*/
