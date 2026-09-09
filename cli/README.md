@@ -234,6 +234,8 @@ Environment variables:
 | `ICT_ENTRY_GATE`   | `1` to only consult the LLM during session killzones AND when price tags a key level — cheap-skip otherwise (big cost cut). Exits stay deterministic. Default off |
 | `ICT_KILLZONES`    | UTC windows `HH:MM-HH:MM,...` (default `07:00-10:00,12:00-15:00` = London + NY). Empty = no time gate |
 | `ICT_LEVEL_PROX_PCT` | wake the LLM when price is within this %% of a key level (prior-day / prior-session high-low). Default `0.15` |
+| `AGENT_WATCH_PLAN`  | `1` to let the agent set its OWN wake conditions — it returns a `watch` plan (price levels + next UTC time) and a free watcher only re-consults it when one fires. Supersedes the static ICT gate. Default off |
+| `MAX_WATCH_IDLE_MIN`| safety cap: re-consult the agent after at most this many minutes even if no level/time trigger fires. Default `360` |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |
 | `AGENT_LOG`        | JSONL log path (default `/tmp/propfund-agent.log`)           |
