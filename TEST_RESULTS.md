@@ -4,14 +4,14 @@ Compiler: solc 0.8.26, EVM Cancun, optimizer on (1 run — needed for size after
 
 _Snapshot — CI runs the full suite (`forge build` + `forge test`) on every push and PR; the Actions tab is the live source of truth._
 
-## 104 passed, 0 failed, 1 skipped (106 with fork RPC set)
+## 125 passed, 0 failed, 1 skipped (127 with fork RPC set)
 
 ```
 $ forge test
-Ran 8 test suites: 104 tests passed, 0 failed, 1 skipped (105 total tests)
+Ran 9 test suites: 125 tests passed, 0 failed, 1 skipped (126 total tests)
 ```
 
-The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 106/106.
+The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 127/127.
 
 ## Suite breakdown
 
@@ -24,20 +24,22 @@ The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA
 | `QueueAndExpiry.t.sol` | 11 | funding queue (O(1) FIFO) + fair pool partition + 14-day position max-duration |
 | `Delegation.t.sol` | 9 | agent authorization, expiry, revoke, max-notional cap, no-fund-leakage to agent |
 | `Router.t.sol` | 3 | `PropFundRouter` atomic update+trade periphery: full lifecycle driven through the router, excess-value refund, auth-required revert |
+| `AgentDesk.t.sol` | 20 | **`AgentDesk`** — the real, firm-funded spot desk: admission from the live PropFund lens (rule) and preapproval (firm discretion), all-in/all-out ETH through one swap venue, profit split + sweep above allocation, loss shrinks the book, drawdown-floor revoke with deposit forfeit, permissionless liquidation of an open ETH book (Pyth-marked, fill bounded to 2% of mark, stale-oracle revert), resign/claim, pause never traps an agent, owner guards, and a full-lifecycle ledger-conservation check |
 | `PythFork.t.sol` | 2 (skipped without RPC) | fork test against live Pyth on Base Sepolia: every listed feed at expo=−8, conf within reasonable bounds |
 
 ## Contract size
 
 ```
-PropFund          24,508 / 24,576  (68 bytes spare under EIP-170)
+PropFund          23,004 / 24,576  (1,572 bytes spare under EIP-170)
 EvalCert           2,551
 EvalCertRenderer   7,853
 PropFundRouter     1,996   (optional atomic-update periphery)
+AgentDesk          8,715   (optional real spot desk — firm-funded; reads PropFund via the lens)
 ```
 
 ## Slither (latest run)
 
-`slither .` → 16 contracts, 95 detectors, 59 results across **9 categories — every one a false
+`slither .` → 19 contracts, 95 detectors, 70 results — **every one a false
 positive or accepted-by-design** (triaged below per the Celo-style "triage every finding" gate):
 
 - `divide-before-multiply` on `notional = marginUsed × leverage` — intentional (notional is trading math; marginUsed is already integer USDC).
@@ -48,6 +50,8 @@ positive or accepted-by-design** (triaged below per the Celo-style "triage every
 - `encode-packed-collision` / `unused-return` / `uninitialized-local` in `EvalCertRenderer` — SVG/JSON buffer construction (DynamicBuffer pattern); strings are built via buffer ops, returns intentionally ignored. No security impact.
 - `uninitialized-local` on `PropFund.queuePosition().pos` — `0` is the intended "not in queue" sentinel default.
 - `missing-inheritance` — PropFund structurally satisfies the router's `IPropFundTrades` interface without formally inheriting it; informational, no behavioral effect.
+- `pyth-unchecked-confidence` in `AgentDesk._mark` — false positive, same class as PropFund's: `_mark` rejects reads with `conf × 10000 > price × MAX_CONF_BPS`; slither only pattern-matches the `getPriceUnsafe` call.
+- `reentrancy-*` in `AgentDesk.enterEth` / `exitEth` / `liquidate` — every external write path carries the transient-storage `nonReentrant` guard; the book writes that follow the venue swap sit inside it. Same triage as `_closeTrade`.
 
 All 5 medium-severity audit findings (M-1 through M-5) and 4 of 4 low-severity findings have been resolved. See [`THREAT_MODEL.md`](./THREAT_MODEL.md).
 

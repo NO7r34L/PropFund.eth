@@ -137,6 +137,7 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
 | `src/PropFundRouter.sol` | **Optional** atomic-update periphery. Folds the Pyth update into the trade (one tx) via the delegation system. Stateless, custody-free; the immutable core is untouched. See [DESIGN.md](./DESIGN.md#atomic-update-router-periphery) |
+| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool. Profit above allocation splits agent/firm; a drawdown breach closes the book and forfeits the agent's deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
 | **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands a signed VAA on-chain (or the router applies it atomically with the trade). Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
 | **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |
 | **Counterparty** | LP pool. Pays winners 80% trader / 15% LP / 5% treasury. Absorbs losses up to position margin |
@@ -149,7 +150,8 @@ The controller's USDC balance never moves; all flows route to the principal.
 src/PropFund.sol                    main contract — eval, funding, queue, trading, delegation, pause
 src/EvalCert.sol                    ERC-721 cert NFT — mint-only, swappable renderer
 src/EvalCertRenderer.sol            procedural SVG renderer — reads trader stats from PropFund
-src/interfaces/{IERC20,IPyth}.sol   minimal interfaces
+src/AgentDesk.sol                   real spot desk — firm-funded, admits agents off the PropFund lens, 1× ETH timing
+src/interfaces/{IERC20,IPyth,ISwapVenue,IPropFundLens}.sol   minimal interfaces
 src/lib/SafeTransferLib.sol         safer ERC-20 transfers
 cli/bin/propfund.js                 CLI entry — full trader lifecycle, delegation, keeper bot
 cli/src/                            CLI command implementations
@@ -160,6 +162,7 @@ test/                               unit, lifecycle, queue, invariants, delegati
 script/DeployLocal.s.sol            Anvil deploy with mocks
 script/DeployBaseSepolia.s.sol      Base Sepolia deploy with live Pyth + auto-wired renderer
 script/DeployBase.s.sol             Base mainnet deploy (production)
+script/DeployDesk.s.sol             AgentDesk deploy against an existing PropFund lens (mock venue/WETH on forks)
 ```
 
 ## Design & guarantees
