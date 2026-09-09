@@ -151,6 +151,7 @@ export function resolveNetwork(name) {
             usdcAddr: process.env.PROPFUND_USDC,
             lensAddr: process.env.PROPFUND_LENS || '',
             routerAddr: process.env.PROPFUND_ROUTER || '',
+            deskAddr: process.env.PROPFUND_DESK || '',       // AgentDesk (real 1x spot book), optional
         };
     }
 

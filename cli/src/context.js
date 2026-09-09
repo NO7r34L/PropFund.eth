@@ -25,6 +25,21 @@ const ROUTER_ABI = [
     'function closeTrade(bytes[] updateData, uint256 closeBps) payable',
 ];
 
+// AgentDesk — the real, firm-funded 1x ETH spot book. Wired only when net.deskAddr is set.
+const DESK_ABI = [
+    'function books(address) view returns (bool active, uint256 allocation, uint256 usdc, uint256 eth, uint256 deposit)',
+    'function bookValue(address) view returns (uint256 value, bool fresh)',
+    'function drawdownFloor(address) view returns (uint256)',
+    'function isLiquidatable(address) view returns (bool)',
+    'function qualifies(address) view returns (bool)',
+    'function earned(address) view returns (uint256)',
+    'function AGENT_DEPOSIT() view returns (uint256)',
+    'function admit()',
+    'function enterEth(uint256 minOut)',
+    'function exitEth(uint256 minOut)',
+    'function claim()',
+];
+
 // Signed actions need PROPFUND_KEY. Read-only commands work with just an RPC.
 export function buildContext({ requireSigner = false, network } = {}) {
     const net = resolveNetwork(network);
@@ -66,8 +81,9 @@ export function buildContext({ requireSigner = false, network } = {}) {
     // View layer: getTraderStats / getEvalStatus moved off the core contract into PropFundLens.
     // Falls back to `propfund` for older deployments that still expose those getters directly.
     const lens = net.lensAddr ? new Contract(getAddress(net.lensAddr), LENS_ABI, runner) : propfund;
+    const desk = net.deskAddr ? new Contract(getAddress(net.deskAddr), DESK_ABI, runner) : null;
 
-    return { net, provider, wallet, propfund, usdc, router, lens };
+    return { net, provider, wallet, propfund, usdc, router, lens, desk };
 }
 
 /**
