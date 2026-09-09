@@ -8,12 +8,12 @@
 
 ## Why trade it
 
-- **Trade the pool's capital, not your own.** Prove yourself in a transparent eval, then trade the LP pool's money. You only ever put up the eval fee — never your bankroll.
+- **Two layers, and it matters which one you're in.** **PropFund** is the *screen*: a $1 eval and then a **virtual** "funded" leg (probation) that builds an immutable on-chain record — no real capital changes hands there. **AgentDesk** is the *real desk*: once your record clears the bar you admit yourself (a rule, not a human) and trade a real book of the **firm's own** USDC. You only ever put up the eval fee and a small deposit — never your bankroll.
 - **Keep 80% of every win.** The 80% trader / 15% LP / 5% protocol split is fixed in the contract and paid automatically. No payout team, no negotiation, no cut that changes later.
 - **The rules can't change on you.** Eval target, leverage, profit split, risk limits — all immutable on-chain. No firm can move the goalposts mid-trade, tighten the limits after you pass, or withhold a payout. *This is the part a centralized prop firm can't promise.*
 - **Get funded permissionlessly.** No KYC, no application, no waiting on a human. Pass the eval, claim funding, trade. Any wallet — or any autonomous agent — runs the whole loop.
 - **Withdraw your own profit, any time.** Cashing out is a function call *you* make. There's no payout queue to sit in and nobody who can freeze it.
-- **You can't be rugged.** Settlement is pure Pyth oracle (no DEX, slippage, or MEV), the LP pool — not a company — is your counterparty, and the risk rails (mandatory TP/SL, 50% margin rule, drawdown + per-trade circuit breakers) are enforced by code on every trade.
+- **You can't be rugged.** In the eval and virtual probation, settlement is pure Pyth oracle — no DEX, no slippage, no MEV — and the LP pool, not a company, is the (virtual) counterparty. **The real desk is different by design: it takes real spot fills on one deep pool, so slippage exists there** (~0.1–0.2% round trip). Everywhere, the risk rails — mandatory TP/SL, margin rule, drawdown floors, circuit breakers — are enforced by code, and no one can move goalposts or withhold a payout.
 - **Agent-native.** Ships with an MCP server, an installable [agent skill](./skill/SKILL.md), and a reference LLM trader — an AI agent can run eval → funded → trade → withdraw with zero human input.
 
 > ### Try it — it's free
@@ -22,35 +22,47 @@
 > ### Help shape it — contributions & feedback wanted
 > This is built in the open and it's early. **Try to break it, then tell us.** Found a bug, an exploitable edge in the rules, a confusing flow, or a smarter way to trade it? [Open an issue](../../issues) or send a PR — every change is CI-gated and reviewed, and good ideas get merged. Running an agent against it? Even better: the repo is structured so an AI agent can propose changes on its own branch ([CONTRIBUTING.md](./CONTRIBUTING.md)). Honest critique is the most useful thing you can contribute.
 
-On-chain prop trading fund. The full trader lifecycle — eval, funding, trading, withdraw —
-runs from a CLI, a script, or any client that can sign EVM transactions. **No web UI. No
-backend. No upgrades. No admin that can change rules.** The LP pool is the counterparty,
-Pyth Network prices are settlement.
+On-chain prop firm for agents, in two immutable contracts. **PropFund** runs the eval and a
+virtual probation leg (Pyth-settled, LP pool as virtual counterparty). **AgentDesk** is the
+real desk: the firm's own capital, real spot trades, entered only by graduating out of PropFund
+on a rule. The whole lifecycle runs from a CLI, a script, or any client that can sign EVM
+transactions. **No web UI. No backend. No upgrades. No admin that can change rules.**
 
 ```mermaid
 flowchart TD
     Agent["Trader / AI agent / script"] -->|signs EVM txs| CLI["propfund CLI (ethers.js)"]
-    CLI -->|eval, fund, trade, withdraw| Contract["PropFund contract (immutable, on-chain)"]
-    Keeper["Keeper bot (permissionless)"] -->|liquidate, settle, force-close| Contract
-    Contract <-->|signed price VAAs| Pyth["Pyth Network (settlement)"]
-    Contract <-->|counterparty, 80/15/5 split| Pool["LP pool"]
+    CLI -->|eval · virtual probation| PF["PropFund (immutable) — the screen"]
+    PF <-->|signed price VAAs| Pyth["Pyth Network (oracle settlement)"]
+    PF <-->|virtual counterparty · 80/15/5| Pool["LP pool (virtual leg only)"]
+    PF -->|record clears the bar → admit() — a rule, not a human| Desk["AgentDesk (immutable) — the real desk"]
+    Firm["The firm's own USDC"] --> Desk
+    Desk <-->|all-in / all-out spot swaps| DEX["one deep pool"]
+    Keeper["Keeper bot (permissionless)"] -->|liquidate · settle · force-close| PF
+    Keeper -->|liquidate a breached book| Desk
 ```
 
 ## How it works
 
-1. **Evaluate** — Pay the eval fee. Open virtual long trades on any of 8 listed assets
-   (ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB), one asset per trade. Net +8% across
-   3+ closed trades, max 5% drawdown, within the 30-day window.
-2. **Get funded** — Pay the trader deposit. Become a funded trader and gain access
-   to LP capital. If the pool is at capacity you're FIFO-queued and can leave for a
-   full deposit refund any time.
-3. **Trade** — Long or short any listed asset. Up to 10× leverage, gated by your
-   level (cumulative-PnL milestones unlock 3×, 5×, 8×, 10×). **Mandatory TP/SL on every
-   trade.** 50% margin rule (the other half always survives a single blowup). 50%
-   circuit breaker on per-trade PnL.
-4. **Cash out** — Keep 80% of profit (compounds into deposit). Withdraw any time
-   above the initial deposit. LP pool gets 15%; the protocol treasury accrues 5% to
-   fund operations + version support.
+The pipeline is staged the way a real prop firm's is: screen cheaply and virtually, and only put
+real capital behind a *sustained record* — never behind a single lucky pass.
+
+1. **Evaluate** *(PropFund, virtual)* — Pay the $1 eval fee. Open virtual long trades on any of
+   8 listed assets (ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB), one asset per trade. Net +8%
+   across 3+ closed trades, max 5% drawdown, within the 30-day window.
+2. **Probation** *(PropFund's "funded" leg — still virtual)* — Pay the trader deposit and trade
+   the virtual funded book: long or short, up to 10× (level-gated), mandatory TP/SL, 50% margin
+   rule, per-trade circuit breaker. **No real capital is deployed here.** Its job is to build an
+   immutable on-chain record — cumulative PnL, wins, losses — that the desk reads.
+3. **Graduate** *(a rule, not a human)* — When your probation record clears the desk's bar,
+   `admit()` on AgentDesk succeeds. The reference agent does this automatically the tick it
+   qualifies; no LLM, no application, no one to say no.
+4. **Trade the real desk** *(AgentDesk, real)* — You get a book of the **firm's own** USDC and
+   one skill to exercise: timing. All-in to ETH or all-out to USDC, 1×, through one deep spot
+   pool. No leverage means no liquidation engine, no funding, no margin — the only risk is ETH
+   price, bounded by a hard drawdown floor.
+5. **Cash out** — On the desk, realized profit above your allocation splits agent/firm and is
+   swept; you pull your share any time. Breach the drawdown floor and the book closes and your
+   deposit is forfeited — and anyone can liquidate a breached open book.
 
 ## Built for autonomous traders
 
@@ -181,6 +193,17 @@ with line references.
   (mandatory TP/SL, 50% margin rule, level-gated leverage, per-trade circuit breaker);
   **strategy** is enforced in the replaceable agent layer (edge-gated entries, deterministic
   exits, deposit-drawdown halt). The protocol owns risk; the agent owns skill.
+- **The two layers have opposite economics — on purpose.** In PropFund's virtual leg the pool is
+  the counterparty, so it profits when traders *lose* and pays when they win. That is exactly why
+  it is a *screen* and not where real money lives. **AgentDesk inverts it:** the firm supplies
+  its own capital and keeps a share of *real* wins, so it profits when agents are *good*. Real
+  capital only ever meets a sustained record. There are no stakers, no LPs on the desk, and
+  nothing is sold to anyone — the firm's economics are the firm's own risk-managed bet.
+- **The model owns judgment; the code owns mechanics.** In the reference agent the LLM decides
+  *entries* — the one thing a model earns its keep on. Admission, marking, exits, and
+  self-scheduling are rules. (Offered admission as an LLM action, the model looked at
+  `qualifies=true` and chose to wait; made mechanical, graduation took ten seconds and zero
+  tokens.) That split is why a whole position costs one LLM call.
 
 ## Safety
 
@@ -258,6 +281,14 @@ is rotated frequently during development; check that file for the current addres
 The 5% treasury share funds protocol operations, ongoing maintenance, and version
 support. It accrues to the contract and is pulled by the immutable `TREASURY` address
 via `withdrawTreasury`. Recommended in production: a multisig.
+
+### The desk's split is separate
+
+PropFund's 80/15/5 above applies to the *virtual* leg. On **AgentDesk** the firm sets
+`AGENT_SPLIT_BPS` at deploy (the devnet runs **50/50**) — deliberately less generous than a
+retail prop firm's 90/10, because there is no evaluation-fee funnel subsidizing it: the desk has
+to pay for itself on real trading. An agent must clear roughly the round-trip venue cost
+(~0.17% on the devnet pool) before a trade nets anything.
 
 ## Use it as an agent skill
 

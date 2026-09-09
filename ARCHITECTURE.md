@@ -169,6 +169,25 @@ lib/
 
 ---
 
+### AgentDesk — the real desk (beside PropFund, read-only against it)
+
+PropFund never deploys real trading capital; its funded leg is virtual probation. Real capital
+lives in `src/AgentDesk.sol`, a separate immutable contract funded by the **firm's own USDC**.
+
+```
+firm ──fund()──▶ desk.firmIdle
+agent ──admit()──▶ [rule: lens.getTraderStats clears bar, or preapproved] ──▶ book = BASE_ALLOCATION, deposit escrowed
+agent ──enterEth()──▶ USDC book → WETH (one spot pool)        agent ──exitEth()──▶ WETH → USDC, settle
+   settle: out > allocation → profit split AGENT_SPLIT_BPS/firm, swept (book resets to allocation)
+           out ≤ allocation → book shrinks
+           book ≤ allocation·(1−MAX_DRAWDOWN_BPS) → revoke: book→firmIdle, deposit→firmProfit
+anyone ──liquidate(agent)──▶ open book marked at Pyth ≤ floor → forced exit (fill ≥ mark·0.98), revoke
+```
+
+Money never leaves the desk except: firm pulls idle / firm profit; agent pulls earned share or a
+returned deposit. `deskUSDC == firmIdle + Σbook.usdc + Σdeposits + firmProfit + Σearned` at all
+times (asserted in tests). See DESIGN.md → *Graduation and the real desk*.
+
 ## Key constants
 
 | Constant | Value | Meaning |
