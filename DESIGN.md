@@ -2,9 +2,18 @@
 
 ## What this is
 
-On-chain prop trading fund. Oracle-settled multi-asset perps. The LP pool is the
-counterparty. No DEX dependency, no off-chain matching, no central admin (the treasury
-wallet has emergency-pause + add-feeds + treasury-withdraw only — no rule changes).
+On-chain prop firm for agents, in two immutable contracts with deliberately different jobs:
+
+- **PropFund** — the *screen*. Oracle-settled, **virtual** multi-asset perps: an eval, then a
+  virtual "funded" probation leg. The LP pool is the (virtual) counterparty. No DEX, no fills, no
+  MEV. No central admin (treasury has emergency-pause + add-feeds + treasury-withdraw only — no
+  rule changes). **No real trading capital is ever deployed by PropFund.**
+- **AgentDesk** — the *real desk*. The firm's own USDC, real spot positions on one pool,
+  entered only by graduating out of PropFund on a rule read from its record. See
+  [Graduation and the real desk](#graduation-and-the-real-desk-agentdesk).
+
+If a reader takes one thing from this file: **"funded" in PropFund is virtual probation; real
+money lives on the desk, and only a sustained record gets you there.**
 
 ## Design boundaries (read this first)
 
@@ -38,6 +47,13 @@ able to settle,"* not *"LPs make money."* Those are different guarantees; confla
 usual design error. The eval fee and split are the knobs that tune LP economics **around** the
 contract, not inside it.
 
+Be precise about *why* LP profitability is out of scope: as the counterparty, the virtual pool
+earns when traders **lose** and pays when they **win** — the inverse of "fund skilled agents."
+That inversion is not a flaw to be tuned away; it is the reason the virtual leg is a **probation
+screen** and not where real capital lives. Real capital lives on AgentDesk, whose economics point
+the other way (the firm profits from *winners*). The two layers are complementary precisely
+because their incentives are opposite.
+
 **The eval is a liveness gate, not a skill oracle.** On-chain eval is intentionally simple: 1×
 **long-only**, +8% over ≥3 closes, ≤5% drawdown, ~30-day window (`EVAL_PROFIT_BPS = 800`,
 `MIN_EVAL_TRADES = 3`, `EVAL_DRAWDOWN_BPS = 500`). In a rising market it is trivially passable —
@@ -63,9 +79,12 @@ is not a property a contract can verify.
 | No admin can move funds or change rules | Contract (immutable, minimal treasury) | **Yes** |
 | LP pool is profitable | Nobody — economic tuning | No, by design |
 | Trader is "skilled" | Agent layer (off-chain) | No — eval is a liveness gate |
+| Real capital ever reaches a lucky eval passer | AgentDesk graduation gate (a rule read from the probation record) | **Yes** — real money only after a record |
+| The firm profits from *skilled* agents | AgentDesk (firm's own capital, share of real wins) | Aligned by construction — not a profit guarantee |
 
 If you remember one thing: **the contract guarantees solvency and risk bounds, not profitability
-or skill — and that line is drawn deliberately, not by omission.**
+or skill — and that line is drawn deliberately, not by omission.** And the second thing:
+**PropFund screens; AgentDesk pays. Don't read the virtual leg as real money.**
 
 ## Lifecycle
 
@@ -101,7 +120,111 @@ LEVEL UP (deploy cap grows; LEVEL_UP NFT minted on first cross of each tier)
   Level 10: 10×   MASTER       after $1000
       ↓
 WITHDRAW PROFIT (principal-only) or RESIGN (deposit returned)
+      ↓
+  ── everything above is VIRTUAL: it builds a record, it never deploys real capital ──
+      ↓
+GRADUATE (AgentDesk.admit — a rule read from the PropFund lens: cumulative PnL ≥ MIN_CUM_PNL,
+  closed trades ≥ MIN_TRADES; or firm preapproval). Posts AGENT_DEPOSIT. No human decides.
+      ↓
+REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
+  enterEth: whole book → WETH through one spot pool   exitEth: whole book → USDC
+  1× long-only. No leverage → no liquidation engine, no funding, no margin.
+  profit above allocation: split AGENT_SPLIT_BPS / firm, swept (allocation IS the high-water)
+  loss: shrinks the book
+  book ≤ allocation × (1 − MAX_DRAWDOWN_BPS): closed, deposit forfeited; anyone may liquidate an
+    open book that has breached (Pyth-marked, fill bounded to 2% of mark)
+  pause blocks admit/enter only — exit, liquidate, resign, claim always work
 ```
+
+## Graduation and the real desk (AgentDesk)
+
+`src/AgentDesk.sol` is the simplest real prop firm expressible on-chain, built **beside**
+PropFund and read-only against it (`IPropFundLens.getTraderStats`). PropFund is unchanged.
+
+### Why a second contract instead of making the funded leg real
+
+Making PropFund's funded leg trade real capital would have put the LP pool short every trader
+(see *Design boundaries*): profitable exactly when agents lose. A real venue behind it (perps,
+or a lending loop) fixes the sign but imports counterparty risk, funding, profit caps, and — in
+the lending case — a DEX swap in the loop, which reintroduces the slippage the design avoids. A
+staker/investor marketplace fixes alignment but adds a staker-yield hole (an allocator keeps
+~15% of wins and eats losses), a two-sided cold start, and a materially heavier regulatory
+profile. Stripping all of that leaves the real prop firm's actual core: **screen many, fund few
+with the firm's own capital, take a cut of real profit, enforce hard risk rules.** That is the
+desk.
+
+```mermaid
+flowchart LR
+    E["1. Eval<br/>virtual · $1 fee"] --> P["2. Probation<br/>PropFund's virtual funded leg<br/>builds an on-chain record"]
+    P -->|record clears the bar| G["3. Graduate<br/>admit() — a rule read from the lens"]
+    G --> D["4. Real desk<br/>firm's own USDC · 1× ETH spot<br/>all-in / all-out"]
+    D -->|profit above allocation| S["split agent / firm, swept"]
+    D -->|drawdown floor| L["book closed · deposit forfeited<br/>anyone can liquidate"]
+```
+
+### The pipeline, and what's real at each stage
+
+| Stage | Contract | Capital at risk | What it's for |
+| --- | --- | --- | --- |
+| Eval | PropFund | none (fee only) | liveness + basic risk discipline |
+| Probation ("funded") | PropFund | **none — virtual** | build a sustained, immutable record |
+| Graduation | AgentDesk `admit()` | none until cleared | a rule: `cumulativePnl ≥ MIN_CUM_PNL`, `wins+losses ≥ MIN_TRADES` (or `setPreapproved` — firm discretion, legitimate when it's the firm's money) |
+| Real desk | AgentDesk | **the firm's own USDC** | timing one asset with a real book |
+
+Real capital only ever meets a record. A lucky eval pass reaches nothing real.
+
+### Admission is mechanical, not a market call
+
+The reference agent admits itself the tick it qualifies, **without consulting the LLM**. This was
+learned, not assumed: the first cut offered `DESK_ADMIT` to the model as an action, and it looked
+at `qualifies=true`, chose to wait (fixated on the eval narrative), set a watch plan, and would
+have stalled graduation for hours behind the entry gate. Same principle as exits: **the model
+owns entries** (a judgment) and **the code owns one-time state transitions**. On the devnet:
+`agent-start 04:02:15 → desk-usdc-approved 04:02:21 → desk-graduated 04:02:25`, zero tokens.
+
+### Desk mechanics
+
+- **Firm-funded.** `fund()` by the owner. No stakers, no LPs, nothing sold. The firm's
+  economics are its own risk-managed bet — which is what founding a prop firm *is*.
+- **One skill: timing.** `enterEth(minOut)` swaps the whole USDC book to WETH; `exitEth(minOut)`
+  swaps it all back. 1×, long-only, one deep pool via `ISwapVenue` (`MockSwap` at Pyth spot on
+  forks; a Uniswap/Aerodrome adapter for real networks). No leverage ⇒ no liquidation engine,
+  no funding rate, no margin.
+- **Settlement.** Profit above the allocation splits `AGENT_SPLIT_BPS` / firm and is swept, so
+  the book stays at its allocation — **the allocation is the high-water; a recovery from a loss
+  earns no split.** Losses shrink the book.
+- **Drawdown floor.** At or below `allocation × (1 − MAX_DRAWDOWN_BPS)` the book closes and the
+  deposit is forfeited. Anyone can `liquidate` an open book that has breached — marked at Pyth
+  with PropFund's freshness + confidence guards, fill bounded to within 2% of the mark so a
+  liquidator can't force a bad price.
+- **Pause never traps an agent.** It blocks admissions and new entries only; exit, liquidate,
+  resign, and claim always work.
+- **The agent exits itself first.** Its code-owned exit manager (take-profit / trailing / stop /
+  floor-guard) sits well inside the keeper's floor, because a keeper liquidation forfeits the
+  deposit. A stale oracle mark is treated as *unknown*, never as a loss.
+
+### The risk stack, in the order it absorbs loss
+
+1. The agent's own deposit (skin-in-the-game, forfeited on a breach).
+2. The agent's automated stop, inside the floor.
+3. The floor-guard (exit within 1% of the floor regardless).
+4. Permissionless keeper liquidation at the floor.
+5. The firm's own capital.
+
+Each layer is a line of code you can point at. That legibility is the transparency the project
+promises, expressed as structure.
+
+### What's honest to say is not there yet
+
+- The venue on the devnet is `MockSwap` (fills at Pyth spot with a 0.1% haircut). A real
+  Aerodrome/Uniswap adapter is required before any real network. Real fills mean real slippage.
+- The admission bar is raw cumulative PnL and trade count. Long-only, that is trivially cleared
+  in a bull market — it wants a drawdown-weighted, two-regime criterion.
+- The keeper sweeps PropFund's paths; it does not yet sweep desk liquidations (anyone can call
+  `liquidate`, but nothing does so automatically).
+- The desk's economics are the *firm's* bet, unproven. Running it with a modest amount of the
+  firm's own capital is the honest experiment that tells you whether screened agents have edge
+  after real frictions — before any third party is involved.
 
 ## Settlement model
 
@@ -266,7 +389,8 @@ The Base mainnet deploy lists 8 assets: ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, A
 - `src/PropFund.sol` — main contract (~1660 lines)
 - `src/EvalCert.sol` — ERC-721 cert NFT (mint-only, swappable renderer)
 - `src/EvalCertRenderer.sol` — fully on-chain SVG renderer (procedural per-trader chart)
-- `src/interfaces/` — IERC20, IPyth
+- `src/AgentDesk.sol` — the real desk (~400 lines): firm-funded, admits off the PropFund lens, 1× ETH spot, drawdown floor, permissionless liquidation
+- `src/interfaces/` — IERC20, IPyth, ISwapVenue (spot venue the desk trades through), IPropFundLens (the subset of the lens the desk reads)
 - `src/lib/SafeTransferLib.sol` — safe transfer + tryTransfer
 - `lib/solady` — vendored: DynamicBufferLib, Base64, LibString
 - `test/PropFund.t.sol` — unit tests (LP, eval, funded, TP/SL, pause, leverage gate, audit)
@@ -275,9 +399,12 @@ The Base mainnet deploy lists 8 assets: ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, A
 - `test/Delegation.t.sol` — controller → principal flows
 - `test/Invariants.t.sol` — 12 stateful invariants
 - `test/PythFork.t.sol` — fork test against live Pyth on Base Sepolia
-- `test/mocks/` — MockUSDC, MockPyth (with conf-aware helper)
+- `test/AgentDesk.t.sol` — 20 desk tests: admission (lens + preapproval), profit split/sweep, loss, drawdown revoke, liquidation (stale-oracle and 2%-fill-bound reverts), pause, ledger conservation
+- `test/mocks/` — MockUSDC, MockPyth (with conf-aware helper), MockWETH, MockSwap (fills at Pyth spot), MockLens
 - `cli/bin/propfund.js` — CLI entry
 - `cli/src/` — CLI command implementations + keeper bot
 - `script/DeployLocal.s.sol` — Anvil with mocks
 - `script/DeployBaseSepolia.s.sol` — Base Sepolia with live Pyth (auto-wires renderer)
 - `script/DeployBase.s.sol` — Base mainnet
+- `script/DeployDesk.s.sol` — AgentDesk against an existing PropFund lens (deploys a mock venue/WETH on forks)
+- `cli/scripts/agent.js` — reference agent: graduates itself to the desk, then trades it under a code-owned exit manager
