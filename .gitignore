@@ -34,3 +34,6 @@ package-lock.json.bak
 coverage/
 lcov.info
 *.tsbuildinfo
+
+# Local devnet ops (yserver quadlets) — internal, like DEPLOY.md
+/devnet/

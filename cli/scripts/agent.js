@@ -313,6 +313,12 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
 
 // Canonical asset ordering for the Base deploy. Index matches contract priceIds[].
 const ASSET_SYMS = ['ETH','BTC','SOL','AVAX','LINK','AAVE','DOGE','ARB'];
+// Restrict the tradeable universe to these symbols (comma-separated env). Empty = all listed
+// assets. Use it when the Pyth API key is only entitled to a subset of feeds — an un-entitled
+// feed 403s at Hermes and the trade would revert on-chain (StaleOracle), wasting gas. The
+// filter is applied before signals are scored, so the agent never picks an un-entitled asset.
+const ASSET_ALLOWLIST = (process.env.AGENT_ASSETS || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+const assetAllowed = (name) => ASSET_ALLOWLIST.length === 0 || ASSET_ALLOWLIST.includes(String(name).toUpperCase());
 
 async function fetchCandles(symbol, tf = '15m', limit = 24) {
     try {
@@ -689,6 +695,15 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
     // Whitelist gate: reject any action not legal in current state. Saves gas, surfaces LLM
     // errors instantly, and stops hallucinated action names ("OPEN_LONG") from contributing
     // to on-chain reverts. Whitelist is computed from the same state the LLM saw.
+    if ((action.action === 'OPEN_TRADE' || action.action === 'OPEN_EVAL_TRADE')) {
+        const aid = relevantAssetId(action, state, network);
+        const nm = network?.assetNames?.[aid];
+        if (nm && !assetAllowed(nm)) {
+            return { ok: false, action: action.action, args: action.args,
+                error: `asset ${nm} not in AGENT_ASSETS allowlist (feed not entitled) — skipping`, rejectedLocally: true };
+        }
+    }
+
     const validActions = computeValidActions(state);
     if (!validActions.includes(action.action)) {
         return {
@@ -967,7 +982,7 @@ async function tick(ctx) {
 
     // Per-trade asset selection means we need all-asset signals everywhere except mid-trade
     // (where the asset is locked until close — focus on the open trade's asset only).
-    const symbols = state.assets.map(a => a.name);
+    const symbols = state.assets.map(a => a.name).filter(assetAllowed);
     const lockedToOneAsset = state.eval?.active === true && state.eval?.in_virtual_trade === true;
     const fetchAll = !lockedToOneAsset;
     const evalSym = state.eval.asset_name || 'ETH';
