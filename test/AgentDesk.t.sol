@@ -63,6 +63,7 @@ contract AgentDeskTest is Test {
             minTrades: 5,        // over at least 5 closed trades
             minProfitFactorBps: 12_000, // gross wins >= 1.2x gross losses
             staleAfter: 5 minutes,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
             scaleT2Bps: T2_BPS,
             scaleT4Bps: T4_BPS,
             scaleT8Bps: T8_BPS,
@@ -141,8 +142,7 @@ contract AgentDeskTest is Test {
 
     function test_enterExit_profit_splitsAndSweeps() public {
         _admit(agent);
-        vm.prank(agent);
-        desk.enterEth(0);
+        _enter(desk, agent);
         AgentDesk.Book memory b = _book(agent);
         assertEq(b.usdc, 0);
         assertEq(b.eth, 0.2e18);                    // $500 / $2500
@@ -165,7 +165,7 @@ contract AgentDeskTest is Test {
     function test_claim_paysAgentCut() public {
         _admit(agent);                              // benchmark 2500
         pyth.setSpotE8(ETH_ID, 3000e8);             // ETH +20% while flat -> no scaling on this win
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 3300e8);             // +10% -> +$50: agent $25, firm $25
         vm.prank(agent); desk.exitEth(0);
         assertEq(_book(agent).allocation, ALLOC);   // hold beat it: stays 1x, earned untouched
@@ -177,7 +177,7 @@ contract AgentDeskTest is Test {
 
     function test_firm_withdrawsProfit() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); desk.exitEth(0);
         uint256 before = usdc.balanceOf(firm);
@@ -189,7 +189,7 @@ contract AgentDeskTest is Test {
 
     function test_exit_smallLoss_shrinksBook_staysActive() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2375e8);             // -5% -> $475, above $450 floor
         vm.prank(agent); desk.exitEth(0);
         AgentDesk.Book memory b = _book(agent);
@@ -201,7 +201,7 @@ contract AgentDeskTest is Test {
 
     function test_exit_drawdownBreach_revokesAndForfeitsDeposit() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);             // -12% -> $440 <= $450 floor
         vm.prank(agent); desk.exitEth(0);
         AgentDesk.Book memory b = _book(agent);
@@ -217,7 +217,7 @@ contract AgentDeskTest is Test {
 
     function test_liquidate_revertsWhenHealthy() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2400e8);             // -4%, healthy
         assertFalse(desk.isLiquidatable(agent));
         vm.prank(keeper);
@@ -227,7 +227,7 @@ contract AgentDeskTest is Test {
 
     function test_liquidate_openEth_onBreach_anyoneCan() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);             // -12%
         assertTrue(desk.isLiquidatable(agent));
         (uint256 v, bool fresh) = desk.bookValue(agent);
@@ -243,7 +243,7 @@ contract AgentDeskTest is Test {
 
     function test_liquidate_revertsOnStaleOracle() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);
         vm.warp(block.timestamp + 6 minutes);       // beyond staleAfter
         vm.prank(keeper);
@@ -253,7 +253,7 @@ contract AgentDeskTest is Test {
 
     function test_liquidate_boundsFill_2pctOfMark() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);
         venue.setSlippageBps(500);                  // venue would fill 5% worse than mark
         vm.prank(keeper);
@@ -274,7 +274,7 @@ contract AgentDeskTest is Test {
 
     function test_resign_inEth_reverts() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         vm.prank(agent);
         vm.expectRevert(AgentDesk.InEth.selector);
         desk.resign();
@@ -282,7 +282,7 @@ contract AgentDeskTest is Test {
 
     function test_pause_blocksAdmitAndEnter_allowsExitLiquidateResignClaim() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         vm.prank(firm); desk.setPaused(true);
 
         _qualify(rando);
@@ -299,7 +299,7 @@ contract AgentDeskTest is Test {
         // resign under pause returns the (scaled) deposit
         vm.prank(agent); vm.expectRevert(AgentDesk.NothingToClaim.selector); desk.claim();
         // re-entry blocked
-        vm.prank(agent); vm.expectRevert(AgentDesk.Paused.selector); desk.enterEth(0);
+        { uint64 tp_ = _tp(); uint64 sl_ = _sl(); vm.prank(agent); vm.expectRevert(AgentDesk.Paused.selector); desk.enterEth(0, tp_, sl_); }
         // resign allowed
         vm.prank(agent); desk.resign();
     }
@@ -317,8 +317,8 @@ contract AgentDeskTest is Test {
     function test_wrongSide_reverts() public {
         _admit(agent);
         vm.prank(agent); vm.expectRevert(AgentDesk.InUsdc.selector); desk.exitEth(0);
-        vm.prank(agent); desk.enterEth(0);
-        vm.prank(agent); vm.expectRevert(AgentDesk.InEth.selector); desk.enterEth(0);
+        _enter(desk, agent);
+        { uint64 tp_ = _tp(); uint64 sl_ = _sl(); vm.prank(agent); vm.expectRevert(AgentDesk.InEth.selector); desk.enterEth(0, tp_, sl_); }
     }
 
     /*//////////////////////////// admission: profit factor ////////////////////////////*/
@@ -346,7 +346,7 @@ contract AgentDeskTest is Test {
     /// @dev One round trip: enter at current spot, move spot by `bps` (signed), exit.
     function _roundTrip(address a, int256 bps) internal {
         (uint256 spot,) = _spot();
-        vm.prank(a); desk.enterEth(0);
+        _enter(desk, a);
         int256 next = int256(spot) * (10_000 + bps) / 10_000;
         pyth.setSpotE8(ETH_ID, next);
         vm.prank(a); desk.exitEth(0);
@@ -355,6 +355,11 @@ contract AgentDeskTest is Test {
         IPyth.Price memory x = pyth.getPriceUnsafe(ETH_ID);
         return (uint256(uint64(x.price)), true);
     }
+    /// @dev Enter with the widest legal bracket. Bracket is computed BEFORE the prank (it reads Pyth).
+    function _enter(AgentDesk d, address a) internal { uint64 tp = _tp(); uint64 sl = _sl(); vm.prank(a); d.enterEth(0, tp, sl); }
+    /// @dev Widest legal bracket at the current spot: target +10%, stop -3%.
+    function _tp() internal view returns (uint64) { (uint256 p,) = _spot(); return uint64(p * 11_000 / 10_000); }
+    function _sl() internal view returns (uint64) { (uint256 p,) = _spot(); return uint64(p * 9_700 / 10_000); }
 
     function test_ladder_noScale_belowTier2() public {
         _admit(agent);
@@ -461,7 +466,7 @@ contract AgentDeskTest is Test {
         _roundTrip(agent, 1000);                    // $750 alloc, $75 deposit, firm earned $25
         uint256 firmProfitBefore = desk.firmProfit();
         pyth.setSpotE8(ETH_ID, 2500e8);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2250e8);             // -10% -> $675 == floor -> breach
         vm.prank(keeper); desk.liquidate(agent);
         AgentDesk.Book memory b = _book(agent);
@@ -483,7 +488,7 @@ contract AgentDeskTest is Test {
     function test_ladder_claimingInsteadOfReinvesting_neverScales() public {
         _admit(agent);
         pyth.setSpotE8(ETH_ID, 2500e8);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); desk.exitEth(0);           // +$50: earned $25 -> scales to $750 at once
         assertEq(_book(agent).allocation, 750e6);
@@ -503,6 +508,7 @@ contract AgentDeskTest is Test {
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: 49e6, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
             scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8, scaleMinTrades: 0, scalePfT2Bps: 0, scalePfT4Bps: 0, scalePfT8Bps: 0, alphaMarginBps: 0
         });
         vm.expectRevert(AgentDesk.BadConfig.selector);
@@ -517,6 +523,7 @@ contract AgentDeskTest is Test {
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: DEPOSIT, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
+            maxStopBps: 300, maxTargetBps: 1000, maxHold: 24 hours,
             scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8,
             scaleMinTrades: 3, scalePfT2Bps: 15_000, scalePfT4Bps: 20_000, scalePfT8Bps: 30_000, alphaMarginBps: 0
         }));
@@ -526,7 +533,7 @@ contract AgentDeskTest is Test {
 
         // one +10% trade: cumPnl $50 >= T2, PF infinite, but trades 1 < sample floor 3 -> stays 1x
         pyth.setSpotE8(ETH_ID, 2500e8);
-        vm.prank(agent); d2.enterEth(0);
+        _enter(d2, agent);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); d2.exitEth(0);
         AgentDesk.Book memory b1 = d2.getBook(agent);
@@ -537,7 +544,7 @@ contract AgentDeskTest is Test {
         // PF = 50 / 39.2 = 1.276 < 1.5.
         for (uint256 i = 0; i < 2; i++) {
             pyth.setSpotE8(ETH_ID, 2500e8);
-            vm.prank(agent); d2.enterEth(0);
+            _enter(d2, agent);
             pyth.setSpotE8(ETH_ID, 2400e8);
             vm.prank(agent); d2.exitEth(0);
         }
@@ -550,7 +557,7 @@ contract AgentDeskTest is Test {
         // one more +10% win on the $460.80 book: +$46.08 -> cumPnl $56.88 >= T2 ($25), PF = 96.08/39.2 = 2.45
         // >= 1.5 -> 2x (PF also clears the 2.0 bar for 4x, but cumPnl < T4 $75 -> lands at 2x)
         pyth.setSpotE8(ETH_ID, 2500e8);
-        vm.prank(agent); d2.enterEth(0);
+        _enter(d2, agent);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); d2.exitEth(0);
         (uint256 m4, ,) = d2.ladder(agent);
@@ -560,7 +567,7 @@ contract AgentDeskTest is Test {
 
     function test_winRatio_liquidationCountsAsLoss() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);
         vm.prank(keeper); desk.liquidate(agent);
         AgentDesk.Book memory b = _book(agent);
@@ -573,7 +580,7 @@ contract AgentDeskTest is Test {
         for (uint256 i = 0; i < 6; i++) { pyth.setSpotE8(ETH_ID, 2500e8); _roundTrip(agent, 1000); }
         pyth.setSpotE8(ETH_ID, 2500e8); _roundTrip(agent, -500);
         pyth.setSpotE8(ETH_ID, 2500e8);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2200e8);
         vm.prank(keeper); desk.liquidate(agent);
         AgentDesk.Book memory b = _book(agent);
@@ -581,15 +588,118 @@ contract AgentDeskTest is Test {
         assertEq(usdc.balanceOf(address(desk)), expected);
     }
 
+    /*//////////////////////////// bracket orders ////////////////////////////*/
+
+    function test_bracket_required_and_bounded() public {
+        _admit(agent);
+        vm.startPrank(agent);
+        vm.expectRevert(AgentDesk.BadBracket.selector); desk.enterEth(0, 0, 0);                    // missing
+        vm.expectRevert(AgentDesk.BadBracket.selector); desk.enterEth(0, 2400e8, 2600e8);          // inverted
+        vm.expectRevert(AgentDesk.BadBracket.selector); desk.enterEth(0, 2750e8, 2400e8);          // stop 4% > 3% bound
+        vm.expectRevert(AgentDesk.BadBracket.selector); desk.enterEth(0, 2800e8, 2450e8);          // target 12% > 10% bound
+        desk.enterEth(0, 2750e8, 2450e8);                                                          // +10% / -2%: ok
+        vm.stopPrank();
+        (uint64 ep, uint64 tp, uint64 sl) = desk.brackets(agent);
+        assertEq(ep, 2500e8); assertEq(tp, 2750e8); assertEq(sl, 2450e8);
+    }
+
+    function test_bracket_enterRevertsOnStaleOracle() public {
+        _admit(agent);
+        vm.warp(block.timestamp + 6 minutes);
+        vm.prank(agent);
+        vm.expectRevert(AgentDesk.StaleOracle.selector);
+        desk.enterEth(0, 2750e8, 2450e8);
+    }
+
+    function test_executeExit_takeProfit_anyone_settlesLikeExit() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2600e8, 2450e8);         // +4% target
+        pyth.setSpotE8(ETH_ID, 2590e8);
+        assertEq(desk.exitReason(agent), 0);
+        vm.prank(keeper); vm.expectRevert(AgentDesk.NotExecutable.selector); desk.executeExit(agent);
+        pyth.setSpotE8(ETH_ID, 2600e8);
+        assertEq(desk.exitReason(agent), 1);
+        vm.prank(keeper); desk.executeExit(agent);
+        AgentDesk.Book memory b = _book(agent);
+        assertTrue(b.active); assertEq(b.eth, 0);
+        assertEq(b.cumPnl, 20e6); assertEq(b.wins, 1);           // $520 out: +$20 realized, split, swept
+        assertEq(desk.firmProfit(), 10e6); assertEq(desk.earned(agent), 10e6);
+        (, uint64 tp0,) = desk.brackets(agent);
+        assertEq(tp0, 0); assertEq(b.entryTime, 0);
+    }
+
+    function test_executeExit_stopLoss() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);         // -2% stop
+        pyth.setSpotE8(ETH_ID, 2440e8);
+        assertEq(desk.exitReason(agent), 2);
+        vm.prank(keeper); desk.executeExit(agent);
+        AgentDesk.Book memory b = _book(agent);
+        assertTrue(b.active); assertEq(b.usdc, 488e6); assertEq(b.losses, 1);
+        assertEq(b.deposit, DEPOSIT);                             // a stop is not a breach: no forfeit
+    }
+
+    function test_executeExit_maxHold_clockNotPrice() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);
+        vm.warp(block.timestamp + 23 hours);
+        pyth.setSpotE8(ETH_ID, 2510e8);                           // fresh, inside the bracket
+        assertEq(desk.exitReason(agent), 0);
+        vm.warp(block.timestamp + 1 hours + 1);
+        pyth.setSpotE8(ETH_ID, 2510e8);
+        assertEq(desk.exitReason(agent), 3);
+        vm.prank(rando); desk.executeExit(agent);
+        assertEq(_book(agent).eth, 0);
+    }
+
+    function test_executeExit_maxHold_revertsOnStaleMark() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);
+        vm.warp(block.timestamp + 25 hours);                      // clock hit, but the mark is 25h old
+        vm.prank(keeper); vm.expectRevert(AgentDesk.StaleOracle.selector); desk.executeExit(agent);
+    }
+
+    function test_executeExit_boundsFill_2pctOfMark() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);
+        pyth.setSpotE8(ETH_ID, 2440e8);
+        venue.setSlippageBps(500);
+        vm.prank(keeper); vm.expectRevert(MockSwap.Slippage.selector); desk.executeExit(agent);
+    }
+
+    function test_updateBracket_tightenOnly() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);
+        vm.startPrank(agent);
+        vm.expectRevert(AgentDesk.BracketWidened.selector); desk.updateBracket(2760e8, 2450e8);   // raise target
+        vm.expectRevert(AgentDesk.BracketWidened.selector); desk.updateBracket(2750e8, 2440e8);   // lower stop
+        desk.updateBracket(2700e8, 2520e8);                                                      // trail: stop above entry
+        vm.stopPrank();
+        (, uint64 tp, uint64 sl) = desk.brackets(agent);
+        assertEq(tp, 2700e8); assertEq(sl, 2520e8);
+        // the trailed stop executes at a profit
+        pyth.setSpotE8(ETH_ID, 2515e8);
+        vm.prank(keeper); desk.executeExit(agent);
+        assertGt(_book(agent).cumPnl, 0);
+    }
+
+    function test_bracket_ladderAppliesOnExecutedExit() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0, 2750e8, 2450e8);
+        pyth.setSpotE8(ETH_ID, 2750e8);                           // +10% target hit: cumPnl $50 -> scales
+        vm.prank(keeper); desk.executeExit(agent);
+        assertGt(_book(agent).allocation, ALLOC);
+    }
+
     /*//////////////////////////// accounting invariant ////////////////////////////*/
 
     /// @dev Desk USDC balance == firmIdle + Σ book.usdc + Σ deposits + firmProfit + Σ earned.
     function test_accounting_conserved_acrossLifecycle() public {
         _admit(agent);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); desk.exitEth(0);
-        vm.prank(agent); desk.enterEth(0);
+        _enter(desk, agent);
         pyth.setSpotE8(ETH_ID, 2400e8);
         vm.prank(agent); desk.exitEth(0);           // small loss, still active
         AgentDesk.Book memory b = _book(agent);

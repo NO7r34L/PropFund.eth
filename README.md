@@ -58,8 +58,11 @@ real capital behind a *sustained record* — never behind a single lucky pass.
    qualifies; no LLM, no application, no one to say no.
 4. **Trade the real desk** *(AgentDesk, real)* — You get a book of the **firm's own** USDC and
    one skill to exercise: timing. All-in to ETH or all-out to USDC, 1×, through one deep spot
-   pool. No leverage means no liquidation engine, no funding, no margin — the only risk is ETH
-   price, bounded by a hard drawdown floor.
+   pool. **Every entry is a bracket order**: take-profit and stop-loss are set in the same
+   transaction, bounded (stop ≤ 3%, target ≤ 10% from entry), and the position is force-closed
+   after 24 h — anyone can execute a bracket that has hit, and a bracket can only be tightened.
+   No leverage means no liquidation engine, no funding, no margin — the only risk is ETH price,
+   bounded by the bracket and a hard drawdown floor.
 5. **Scale, then cash out** — On the desk, realized profit above your allocation splits
    agent/firm and is swept. Your **allocation grows with your track record** (1× → 2× → 4× → 8×)
    — but only for realized profit that beats simply holding ETH since you were admitted, and only
@@ -155,7 +158,7 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
 | `src/PropFundRouter.sol` | **Optional** atomic-update periphery. Folds the Pyth update into the trade (one tx) via the delegation system. Stateless, custody-free; the immutable core is untouched. See [DESIGN.md](./DESIGN.md#atomic-update-router-periphery) |
-| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool. Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold, gated on the agent's profit factor (win ratio weighted by size) per tier, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
+| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool, every entry a bounded on-chain bracket order with a 24 h max hold that anyone can execute. Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold, gated on the agent's profit factor (win ratio weighted by size) per tier, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
 | `analysis/desk_sim.py` | 1000-agent, four-regime simulation of the desk's exact mechanics (flat vs ladder, exit-manager shapes). The numbers behind the deployed defaults |
 | **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands a signed VAA on-chain (or the router applies it atomically with the trade). Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
 | **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |
@@ -302,9 +305,10 @@ round-trip venue cost (~0.17% on the devnet pool) before a trade nets anything.
 **Why these numbers.** `analysis/desk_sim.py` runs 1000 agents (85% noise, 10% modest edge, 5%
 anti-skill) through the contract's exact mechanics across bull / bear / chop / mixed years. Two
 things moved the firm from a wash (+0.3–1.0%/yr, almost entirely forfeited deposits netting
-against book losses) to +6–10%/yr in every regime: an **asymmetric exit manager** in the agent
-(stop 1.5% / target 6% / wide trail / week time-stop — the old 3%/2% shape needed ~64% accuracy just
-to cover friction and left even skilled agents net negative), and a ladder gated on **win ratio,
+against book losses) to double digits in every regime: an **asymmetric bracket** (stop 1.5% /
+target 6% — the old 3%/2% shape needed ~64% accuracy just to cover friction and left even skilled
+agents net negative) **with a short on-chain max hold** (a fixed bracket with a 1-day hold beat
+week-long holds 4–6× in the sim: chop +24.7% vs +4.2%/yr), and a ladder gated on **win ratio,
 not trade count** (profit factor per tier over a 20-trade sample floor). A count gate assumes
 trades are scarce; agents trade many times a day, and in the sim a 40/80/120-trade gate only
 delayed proven winners — 0 agents reached 8× on weekly holds — while buying no precision (every

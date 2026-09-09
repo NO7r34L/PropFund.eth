@@ -177,7 +177,9 @@ lives in `src/AgentDesk.sol`, a separate immutable contract funded by the **firm
 ```
 firm ──fund()──▶ desk.firmIdle
 agent ──admit()──▶ [rule: lens.getTraderStats clears bar, or preapproved] ──▶ book = BASE_ALLOCATION, deposit escrowed
-agent ──enterEth()──▶ USDC book → WETH (one spot pool)        agent ──exitEth()──▶ WETH → USDC, settle
+agent ──enterEth(minOut, tp, sl)──▶ USDC book → WETH (one spot pool); bracket bounded to MAX_STOP/MAX_TARGET of Pyth entry
+agent ──updateBracket(tp, sl)──▶ tighten only            agent ──exitEth()──▶ WETH → USDC, settle
+anyone ──executeExit(agent)──▶ mark ≥ tp | ≤ sl | age ≥ MAX_HOLD → WETH → USDC (fill ≥ mark·0.98), settle
    settle: out > allocation → profit split AGENT_SPLIT_BPS/firm, swept (book resets to allocation)
            out ≤ allocation → book shrinks
            book ≤ allocation·(1−MAX_DRAWDOWN_BPS) → revoke: book→firmIdle, deposit→firmProfit
@@ -186,7 +188,7 @@ agent ──enterEth()──▶ USDC book → WETH (one spot pool)        agent 
            up:   firmIdle → book (capped by firmIdle and by (deposit+earned)/MAX_DRAWDOWN); earned → deposit shortfall
            down: book excess → firmIdle; deposit excess → earned
 anyone ──liquidate(agent)──▶ open book marked at Pyth ≤ floor → forced exit (fill ≥ mark·0.98), revoke
-keeper ──sweep──▶ walks desk.agents, calls liquidate on any isLiquidatable book (same tick as PropFund's paths)
+keeper ──sweep──▶ walks desk.agents: liquidate any isLiquidatable book, executeExit any exitReason ≠ 0 (same tick as PropFund's paths)
 ```
 
 Money never leaves the desk except: firm pulls idle / firm profit; agent pulls earned share or a

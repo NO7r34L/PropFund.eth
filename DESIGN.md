@@ -128,7 +128,10 @@ GRADUATE (AgentDesk.admit — a rule read from the PropFund lens: cumulative PnL
   preapproval). Posts AGENT_DEPOSIT; records ETH spot as the buy-and-hold benchmark. No human decides.
       ↓
 REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
-  enterEth: whole book → WETH through one spot pool   exitEth: whole book → USDC
+  enterEth(minOut, tp, sl): whole book → WETH through one spot pool, BRACKET MANDATORY:
+    sl ≥ spot × (1 − MAX_STOP_BPS), tp ≤ spot × (1 + MAX_TARGET_BPS); updateBracket may only tighten
+  executeExit (anyone): mark ≥ tp | mark ≤ sl | age ≥ MAX_HOLD → close, settle exactly like exitEth
+  exitEth: whole book → USDC (the agent's own discretionary exit)
   1× long-only. No leverage → no liquidation engine, no funding, no margin.
   profit above allocation: split AGENT_SPLIT_BPS / firm, swept (allocation IS the high-water)
   loss: shrinks the book
@@ -192,10 +195,20 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
 
 - **Firm-funded.** `fund()` by the owner. No stakers, no LPs, nothing sold. The firm's
   economics are its own risk-managed bet — which is what founding a prop firm *is*.
-- **One skill: timing.** `enterEth(minOut)` swaps the whole USDC book to WETH; `exitEth(minOut)`
+- **One skill: timing.** `enterEth(minOut, tp, sl)` swaps the whole USDC book to WETH; `exitEth(minOut)`
   swaps it all back. 1×, long-only, one deep pool via `ISwapVenue` (`MockSwap` at Pyth spot on
   forks; a Uniswap/Aerodrome adapter for real networks). No leverage ⇒ no liquidation engine,
   no funding rate, no margin.
+- **Every entry is a bracket order, on-chain.** The take-profit and stop-loss are set in the entry
+  transaction — same as PropFund's `openTrade` — and bounded: the stop at most `MAX_STOP_BPS` (3%)
+  below the Pyth entry price, the target at most `MAX_TARGET_BPS` (10%) above. A position older
+  than `MAX_HOLD` (24 h) can be closed by anyone. `executeExit` is permissionless and settles
+  exactly like the agent's own exit (split, loss, ladder) — the bracket doing its job is not a
+  penalty. `updateBracket` can only *tighten* (raise the stop, lower the target): the risk an agent
+  enters with is the most risk it can ever hold. Why on-chain rather than in the agent's code: an
+  agent running different code could otherwise sit in ETH indefinitely with nothing between it and
+  the 10% floor. Why short: in simulation a fixed bracket with a 1-day max hold beat week-long
+  holds 4–6× across regimes — timing is a short-horizon skill; holding is beta.
 - **Settlement.** Profit above the allocation splits `AGENT_SPLIT_BPS` / firm and is swept, so
   the book stays at its allocation — **the allocation is the high-water; a recovery from a loss
   earns no split.** Losses shrink the book.
@@ -226,20 +239,23 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   liquidator can't force a bad price.
 - **Pause never traps an agent.** It blocks admissions and new entries only; exit, liquidate,
   resign, and claim always work.
-- **The agent exits itself first.** Its code-owned exit manager sits well inside the keeper's
-  floor, because a keeper liquidation forfeits the deposit. A stale oracle mark is treated as
-  *unknown*, never as a loss. **Its shape is asymmetric on purpose:** stop 1.5%, target 6%, trail
-  arms at 3% and gives back 1.5%, time-stop after a week (`DESK_*` env). Risk 1.5 to make 6 needs
-  a ~25% hit rate to cover friction; the earlier 3%-stop / 2%-target shape needed ~64% and left even
-  skilled agents net negative in simulation.
+- **The agent exits itself first.** With the bracket on-chain, its code has three jobs: execute
+  its own bracket the moment it hits (don't wait for a keeper), trail the stop upward via
+  `updateBracket` as the trade works, and floor-guard — exit before a keeper *liquidation* (the
+  drawdown floor), because that forfeits the deposit while a bracket exit does not. A stale oracle
+  mark is treated as *unknown*, never as a loss. **The default bracket is asymmetric on purpose:**
+  stop 1.5%, target 6% (`DESK_*` env; the LLM may choose its own within the bounds). Risk 1.5 to
+  make 6 needs a ~25% hit rate to cover friction; the earlier 3%-stop / 2%-target shape needed ~64%
+  and left even skilled agents net negative in simulation.
 
 ### The risk stack, in the order it absorbs loss
 
 1. The agent's own deposit (skin-in-the-game, forfeited on a breach).
-2. The agent's automated stop, inside the floor.
-3. The floor-guard (exit within 1% of the floor regardless).
-4. Permissionless keeper liquidation at the floor.
-5. The firm's own capital.
+2. The on-chain bracket: stop ≤ 3% from entry, target ≤ 10%, max hold 24 h — executable by anyone.
+3. The agent's trail (tightens the on-chain stop; can never widen it).
+4. The floor-guard (the agent exits within 1% of the floor regardless).
+5. Permissionless keeper liquidation at the floor.
+6. The firm's own capital.
 
 Each layer is a line of code you can point at. That legibility is the transparency the project
 promises, expressed as structure.

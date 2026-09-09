@@ -10,6 +10,8 @@ pragma solidity 0.8.26;
 //                BASE_ALLOCATION (default 500e6), AGENT_DEPOSIT (50e6), MAX_DD_BPS (1000),
 //                AGENT_SPLIT_BPS (4000), MIN_CUM_PNL (10e6), MIN_TRADES (5),
 //                MIN_PROFIT_FACTOR_BPS (12000 = gross wins >= 1.2x gross losses), STALE_AFTER (300)
+//                Bracket bounds: MAX_STOP_BPS (300 = stop within 3% of entry), MAX_TARGET_BPS (1000 =
+//                target within 10%), MAX_HOLD_SEC (86400 = a position can be force-exited after 24h)
 //                Allocation ladder (bps of BASE_ALLOCATION of realized desk PnL):
 //                SCALE_T2_BPS (2000 = $100 -> 2x), SCALE_T4_BPS (5000 = $250 -> 4x),
 //                SCALE_T8_BPS (12000 = $600 -> 8x); win-ratio gate per tier as profit factor
@@ -78,6 +80,9 @@ contract DeployDeskScript is Script {
             minTrades:      vm.envOr("MIN_TRADES", uint256(5)),
             minProfitFactorBps: vm.envOr("MIN_PROFIT_FACTOR_BPS", uint256(12_000)),
             staleAfter:     vm.envOr("STALE_AFTER", uint256(300)),
+            maxStopBps:     vm.envOr("MAX_STOP_BPS", uint256(300)),
+            maxTargetBps:   vm.envOr("MAX_TARGET_BPS", uint256(1000)),
+            maxHold:        vm.envOr("MAX_HOLD_SEC", uint256(86_400)),
             scaleT2Bps:     vm.envOr("SCALE_T2_BPS", uint256(2000)),
             scaleT4Bps:     vm.envOr("SCALE_T4_BPS", uint256(5000)),
             scaleT8Bps:     vm.envOr("SCALE_T8_BPS", uint256(12_000)),

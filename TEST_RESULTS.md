@@ -8,7 +8,7 @@ _Snapshot — CI runs the full suite (`forge build` + `forge test`) on every pus
 
 ```
 $ forge test
-Ran 9 test suites: 141 tests passed, 0 failed, 1 skipped (142 total tests)
+Ran 9 test suites: 150 tests passed, 0 failed, 1 skipped (151 total tests)
 ```
 
 The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA_RPC` is not set in the environment. With the env var set, it runs 2 fork tests against live Pyth (passing) for a clean 127/127.
@@ -24,7 +24,7 @@ The 1 skipped test is `test/PythFork.t.sol`, which auto-skips when `BASE_SEPOLIA
 | `QueueAndExpiry.t.sol` | 11 | funding queue (O(1) FIFO) + fair pool partition + 14-day position max-duration |
 | `Delegation.t.sol` | 9 | agent authorization, expiry, revoke, max-notional cap, no-fund-leakage to agent |
 | `Router.t.sol` | 3 | `PropFundRouter` atomic update+trade periphery: full lifecycle driven through the router, excess-value refund, auth-required revert |
-| `AgentDesk.t.sol` | 36 | **`AgentDesk`** — the real, firm-funded spot desk: admission from the live PropFund lens (rule: cumPnl, trades, **profit factor**) and preapproval (firm discretion), stale-oracle revert on admit, all-in/all-out ETH through one swap venue, profit split + sweep above allocation, loss shrinks the book, drawdown-floor revoke with deposit forfeit, permissionless liquidation of an open ETH book (Pyth-marked, fill bounded to 2% of mark, stale-oracle revert), resign/claim, pause never traps an agent, owner guards; **the allocation ladder** — no scale below tier 2, scale-up collateralized from `earned` (deposit ≥ allocation × drawdown asserted), no scale when buy-and-hold would have beaten the agent, scale when ETH is down and the agent is up (hurdle = 0), scale-up capped by firm idle, climb to the 8× hard cap, scale-down on losses releasing capital + deposit, blow-up at a scaled tier makes the firm whole, resign returns the scaled deposit, claiming instead of reinvesting caps the ladder, **win-ratio gate** (dollar tier alone doesn't scale without the per-tier profit factor over the `SCALE_MIN_TRADES` sample floor; `winRatio()` reports PF + win rate; a liquidation is booked as a loss), under-collateralized base config rejected; ledger conservation across the full lifecycle and across the ladder + a liquidation |
+| `AgentDesk.t.sol` | 45 | **`AgentDesk`** — the real, firm-funded spot desk: admission from the live PropFund lens (rule: cumPnl, trades, **profit factor**) and preapproval (firm discretion), stale-oracle revert on admit, all-in/all-out ETH through one swap venue, profit split + sweep above allocation, loss shrinks the book, drawdown-floor revoke with deposit forfeit, permissionless liquidation of an open ETH book (Pyth-marked, fill bounded to 2% of mark, stale-oracle revert), resign/claim, pause never traps an agent, owner guards; **the allocation ladder** — no scale below tier 2, scale-up collateralized from `earned` (deposit ≥ allocation × drawdown asserted), no scale when buy-and-hold would have beaten the agent, scale when ETH is down and the agent is up (hurdle = 0), scale-up capped by firm idle, climb to the 8× hard cap, scale-down on losses releasing capital + deposit, blow-up at a scaled tier makes the firm whole, resign returns the scaled deposit, claiming instead of reinvesting caps the ladder, **win-ratio gate** (dollar tier alone doesn't scale without the per-tier profit factor over the `SCALE_MIN_TRADES` sample floor; `winRatio()` reports PF + win rate; a liquidation is booked as a loss), under-collateralized base config rejected; **bracket orders** — entry requires a bracket within `MAX_STOP_BPS`/`MAX_TARGET_BPS` (missing / inverted / too-far all revert), entry needs a fresh oracle, permissionless `executeExit` on take-profit (settles like an exit: split + ladder), on stop-loss (no deposit forfeit), on max hold (clock, not price; still needs a fresh mark to bound the fill), reverts when nothing has hit, fill bounded to 2% of mark, `updateBracket` tighten-only with the trailed stop executing at a profit; ledger conservation across the full lifecycle and across the ladder + a liquidation |
 | `PythFork.t.sol` | 2 (skipped without RPC) | fork test against live Pyth on Base Sepolia: every listed feed at expo=−8, conf within reasonable bounds |
 
 ## Contract size
@@ -34,7 +34,7 @@ PropFund          23,004 / 24,576  (1,572 bytes spare under EIP-170)
 EvalCert           2,551
 EvalCertRenderer   7,853
 PropFundRouter     1,996   (optional atomic-update periphery)
-AgentDesk         13,137   (optional real spot desk — firm-funded; reads PropFund via the lens; allocation ladder)
+AgentDesk         15,862   (optional real spot desk — firm-funded; reads PropFund via the lens; bracket orders + allocation ladder)
 ```
 
 ## Slither (latest run)
