@@ -132,8 +132,9 @@ REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
   1× long-only. No leverage → no liquidation engine, no funding, no margin.
   profit above allocation: split AGENT_SPLIT_BPS / firm, swept (allocation IS the high-water)
   loss: shrinks the book
-  after every exit — THE LADDER: realized desk PnL ≥ SCALE_T2/T4/T8 of base AND closed desk trades
-    ≥ SCALE_MIN_TRADES × 1/2/3 AND realized PnL ≥ what a base-sized hold of ETH made since admission
+  after every exit — THE LADDER: realized desk PnL ≥ SCALE_T2/T4/T8 of base AND profit factor
+    (gross wins / gross losses) ≥ SCALE_PF_T2/T4/T8 over ≥ SCALE_MIN_TRADES closed desk trades
+    AND realized PnL ≥ what a base-sized hold of ETH made since admission
     → allocation 2×/4×/8× (deposit topped up from earned so it always covers allocation × drawdown);
     falls back down on losses (excess book → firm, excess deposit → earned)
   book ≤ allocation × (1 − MAX_DRAWDOWN_BPS): closed, deposit forfeited; anyone may liquidate an
@@ -202,8 +203,14 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   tail at one allocation, and the whole prop-firm thesis is riding the winners. After every exit
   the desk recomputes a target multiplier (1×/2×/4×/8× of `BASE_ALLOCATION`) from realized desk PnL
   (`SCALE_T2/T4/T8_BPS`), with three gates that each answer a specific failure mode:
-  - **Track record, not a lucky trade** — each tier needs `SCALE_MIN_TRADES` × 1/2/3 closed desk
-    trades. A single ±5% ETH move clears any dollar threshold; 40 trades don't.
+  - **Win ratio, not a lucky trade** — each tier needs a profit factor (gross wins ÷ gross losses,
+    `SCALE_PF_T2/T4/T8_BPS`) over a sample floor of `SCALE_MIN_TRADES` closed desk trades. Profit
+    factor is the win ratio that survives adversarial exit shapes: a 90% win rate from a tiny
+    take-profit and a wide stop has a profit factor below 1 and never scales, while the asymmetric
+    exit that actually makes money (35–45% win rate, 4:1 reward) clears it easily. It is also
+    frequency-independent — a trade-count gate (the first version) only delayed winners once agents
+    trade many times a day, and bought no precision. Win rate is recorded on-chain (`winRatio()`) for
+    the record, but it is not what scales the book.
   - **Alpha, not beta** — realized PnL must be ≥ what a *base-sized buy-and-hold of ETH* made since
     admission (zero when ETH is down, so staying flat through a drawdown counts). Long-only
     timing in a bull market is otherwise paid for beta the firm could have bought.

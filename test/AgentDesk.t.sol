@@ -67,7 +67,8 @@ contract AgentDeskTest is Test {
             scaleT4Bps: T4_BPS,
             scaleT8Bps: T8_BPS,
             maxAllocationMult: 8,
-            scaleMinTrades: 0,   // ladder tests exercise the $ tiers; the track-record gate has its own test
+            scaleMinTrades: 0,   // ladder tests exercise the $ tiers; the win-ratio gate has its own test
+            scalePfT2Bps: 0, scalePfT4Bps: 0, scalePfT8Bps: 0,
             alphaMarginBps: 0
         }));
 
@@ -502,44 +503,68 @@ contract AgentDeskTest is Test {
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: 49e6, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
-            scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8, scaleMinTrades: 0, alphaMarginBps: 0
+            scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8, scaleMinTrades: 0, scalePfT2Bps: 0, scalePfT4Bps: 0, scalePfT8Bps: 0, alphaMarginBps: 0
         });
         vm.expectRevert(AgentDesk.BadConfig.selector);
         new AgentDesk(c);
     }
 
-    /// @notice A track record, not a lucky trade: the $ tier alone doesn't scale without the
-    ///         per-tier minimum number of closed desk trades (1x / 2x / 3x SCALE_MIN_TRADES).
-    function test_ladder_requiresTrackRecord_minTrades() public {
+    /// @notice A win ratio, not a lucky trade: the $ tier alone doesn't scale without the per-tier
+    ///         profit factor (gross wins / gross losses) over the sample floor. Frequency-independent.
+    function test_ladder_requiresWinRatio_profitFactorAndSampleFloor() public {
         AgentDesk d2 = new AgentDesk(AgentDesk.Config({
             owner: firm, usdc: IERC20(address(usdc)), weth: IERC20(address(weth)), pyth: IPyth(address(pyth)),
             ethPriceId: ETH_ID, lens: IPropFundLens(address(lens)), venue: ISwapVenue(address(venue)),
             baseAllocation: ALLOC, agentDeposit: DEPOSIT, maxDrawdownBps: DD_BPS, agentSplitBps: SPLIT_BPS,
             minCumPnl: 10e6, minTrades: 5, minProfitFactorBps: 0, staleAfter: 5 minutes,
-            scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8, scaleMinTrades: 3, alphaMarginBps: 0
+            scaleT2Bps: T2_BPS, scaleT4Bps: T4_BPS, scaleT8Bps: T8_BPS, maxAllocationMult: 8,
+            scaleMinTrades: 3, scalePfT2Bps: 15_000, scalePfT4Bps: 20_000, scalePfT8Bps: 30_000, alphaMarginBps: 0
         }));
         vm.startPrank(firm); usdc.approve(address(d2), type(uint256).max); d2.fund(10_000e6); vm.stopPrank();
         _qualify(agent);
         vm.startPrank(agent); usdc.approve(address(d2), type(uint256).max); d2.admit(); vm.stopPrank();
-        // one +10% trade: cumPnl $50 >= T2 but trades 1 < 3 -> stays 1x
+
+        // one +10% trade: cumPnl $50 >= T2, PF infinite, but trades 1 < sample floor 3 -> stays 1x
         pyth.setSpotE8(ETH_ID, 2500e8);
         vm.prank(agent); d2.enterEth(0);
         pyth.setSpotE8(ETH_ID, 2750e8);
         vm.prank(agent); d2.exitEth(0);
         AgentDesk.Book memory b1 = d2.getBook(agent);
-        assertEq(b1.allocation, ALLOC); assertEq(b1.trades, 1); assertEq(b1.entryTime, 0);
+        assertEq(b1.allocation, ALLOC); assertEq(b1.trades, 1); assertEq(b1.wins, 1); assertEq(b1.grossProfit, 50e6);
         (uint256 m1,,) = d2.ladder(agent); assertEq(m1, 1);
-        // two more small trades (no new $ needed) -> trades 3 -> 2x unlocks
+
+        // two losers of -4% ($20 on $500, then $19.20 on $480): trades 3 (floor met), cumPnl $10.80 < T2 -> 1x.
+        // PF = 50 / 39.2 = 1.276 < 1.5.
         for (uint256 i = 0; i < 2; i++) {
             pyth.setSpotE8(ETH_ID, 2500e8);
             vm.prank(agent); d2.enterEth(0);
-            assertEq(d2.getBook(agent).entryTime, block.timestamp);
-            pyth.setSpotE8(ETH_ID, 2505e8);
+            pyth.setSpotE8(ETH_ID, 2400e8);
             vm.prank(agent); d2.exitEth(0);
         }
         AgentDesk.Book memory b3 = d2.getBook(agent);
-        assertEq(b3.trades, 3);
-        assertGt(b3.allocation, ALLOC);
+        assertEq(b3.trades, 3); assertEq(b3.losses, 2); assertEq(b3.grossLoss, 39.2e6);
+        (uint256 pf, uint256 wr) = d2.winRatio(agent);
+        assertEq(pf, 12_755); assertEq(wr, 3_333);
+        assertEq(b3.allocation, ALLOC);
+
+        // one more +10% win on the $460.80 book: +$46.08 -> cumPnl $56.88 >= T2 ($25), PF = 96.08/39.2 = 2.45
+        // >= 1.5 -> 2x (PF also clears the 2.0 bar for 4x, but cumPnl < T4 $75 -> lands at 2x)
+        pyth.setSpotE8(ETH_ID, 2500e8);
+        vm.prank(agent); d2.enterEth(0);
+        pyth.setSpotE8(ETH_ID, 2750e8);
+        vm.prank(agent); d2.exitEth(0);
+        (uint256 m4, ,) = d2.ladder(agent);
+        assertEq(m4, 2);
+        assertGt(d2.getBook(agent).allocation, ALLOC);
+    }
+
+    function test_winRatio_liquidationCountsAsLoss() public {
+        _admit(agent);
+        vm.prank(agent); desk.enterEth(0);
+        pyth.setSpotE8(ETH_ID, 2200e8);
+        vm.prank(keeper); desk.liquidate(agent);
+        AgentDesk.Book memory b = _book(agent);
+        assertEq(b.trades, 1); assertEq(b.losses, 1); assertEq(b.grossLoss, 60e6); assertEq(b.cumPnl, -60e6);
     }
 
     /// @dev Conservation holds through scale-ups, scale-downs and a liquidation.

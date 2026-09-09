@@ -26,10 +26,11 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 ///           - ALLOCATION SCALES with realized desk PnL (1x → 2x → 4x → 8x of the base book), and
 ///             scales back down on losses. A flat allocation caps the right tail at one book; the
 ///             whole prop-firm thesis is riding the winners, so the book must be able to grow.
-///           - ...but only on a TRACK RECORD, not a lucky trade. Each tier also needs a minimum
-///             number of closed desk trades (SCALE_MIN_TRADES × 1/2/3). A 1000-agent simulation
-///             (analysis/desk_sim.py) showed that without this the ladder scales noise as often as
-///             skill and costs the firm money; with it the ladder is net positive in every regime.
+///           - ...but only on a WIN RATIO, not a lucky trade. Each tier needs a minimum profit
+///             factor (gross wins / gross losses — win rate weighted by size, so it can't be gamed
+///             with a tiny take-profit and a wide stop) over a small sample of closed desk trades.
+///             Agents trade many times a day; a raw trade-count gate only delays proven winners
+///             (analysis/desk_sim.py), and the firm's real protection at scale is the collateral rule.
 ///           - ...but ONLY FOR ALPHA OVER HOLDING. Long-only timing in a bull market "profits" by
 ///             beta — the firm could have earned that by holding ETH. To scale, an agent's realized
 ///             desk PnL must exceed what a base-sized buy-and-hold of ETH made since its admission
@@ -123,8 +124,12 @@ contract AgentDesk {
     uint256 public immutable SCALE_T8_BPS;
     /// @notice Hard cap on the allocation multiplier (≤ 8).
     uint256 public immutable MAX_ALLOCATION_MULT;
-    /// @notice Closed desk trades required for 2x; 4x needs 2×, 8x needs 3× this. A track record.
+    /// @notice Sample floor: closed desk trades before any tier can unlock (same for every tier).
     uint256 public immutable SCALE_MIN_TRADES;
+    /// @notice Profit factor (gross wins / gross losses, bps) required for 2x / 4x / 8x.
+    uint256 public immutable SCALE_PF_T2_BPS;
+    uint256 public immutable SCALE_PF_T4_BPS;
+    uint256 public immutable SCALE_PF_T8_BPS;
     /// @notice To scale, realized PnL must beat a base-sized buy-and-hold of ETH by this margin (bps).
     uint256 public immutable ALPHA_MARGIN_BPS;
 
@@ -149,8 +154,12 @@ contract AgentDesk {
         int256  cumPnl;       // cumulative REALIZED desk PnL — drives the allocation ladder
         uint256 entryUsdc;    // USDC that went into the current ETH position (exact PnL basis)
         uint256 benchPrice;   // ETH spot (1e8) at admission — the buy-and-hold benchmark start
-        uint64  trades;       // closed desk trades (exits + liquidations) — the track record
+        uint64  trades;       // closed desk trades (exits + liquidations)
         uint64  entryTime;    // block.timestamp of the current ETH entry (0 while in USDC)
+        uint64  wins;         // closed trades with pnl > 0
+        uint64  losses;       // closed trades with pnl <= 0
+        uint256 grossProfit;  // Σ positive pnl — with grossLoss, the win ratio the ladder reads
+        uint256 grossLoss;    // Σ |negative pnl|
     }
 
     /// @notice Firm USDC not allocated to any book.
@@ -211,6 +220,9 @@ contract AgentDesk {
         uint256 scaleT8Bps;
         uint256 maxAllocationMult;
         uint256 scaleMinTrades;
+        uint256 scalePfT2Bps;
+        uint256 scalePfT4Bps;
+        uint256 scalePfT8Bps;
         uint256 alphaMarginBps;
     }
 
@@ -225,6 +237,7 @@ contract AgentDesk {
         if (c.agentDeposit < c.baseAllocation * c.maxDrawdownBps / 10_000) revert BadConfig();
         if (c.maxAllocationMult == 0 || c.maxAllocationMult > 8) revert BadConfig();
         if (!(c.scaleT2Bps < c.scaleT4Bps && c.scaleT4Bps < c.scaleT8Bps)) revert BadConfig();
+        if (!(c.scalePfT2Bps <= c.scalePfT4Bps && c.scalePfT4Bps <= c.scalePfT8Bps)) revert BadConfig();
         OWNER = c.owner;
         USDC = c.usdc;
         WETH = c.weth;
@@ -245,6 +258,9 @@ contract AgentDesk {
         SCALE_T8_BPS = c.scaleT8Bps;
         MAX_ALLOCATION_MULT = c.maxAllocationMult;
         SCALE_MIN_TRADES = c.scaleMinTrades;
+        SCALE_PF_T2_BPS = c.scalePfT2Bps;
+        SCALE_PF_T4_BPS = c.scalePfT4Bps;
+        SCALE_PF_T8_BPS = c.scalePfT8Bps;
         ALPHA_MARGIN_BPS = c.alphaMarginBps;
     }
 
@@ -332,6 +348,10 @@ contract AgentDesk {
         b.benchPrice = spot;
         b.trades = 0;
         b.entryTime = 0;
+        b.wins = 0;
+        b.losses = 0;
+        b.grossProfit = 0;
+        b.grossLoss = 0;
         agents.push(msg.sender);
 
         // INTERACTIONS
@@ -393,8 +413,7 @@ contract AgentDesk {
         WETH.approve(address(VENUE), ethIn);
         uint256 out = VENUE.swapExactIn(address(WETH), address(USDC), ethIn, minOut, address(this));
         emit Liquidated(agent, msg.sender, mark, out);
-        b.cumPnl += int256(out) - int256(b.entryUsdc);
-        b.trades += 1;
+        _record(b, int256(out) - int256(b.entryUsdc));
         b.usdc = out;
         _revoke(agent, b, true);
     }
@@ -427,8 +446,7 @@ contract AgentDesk {
     ///      breach; otherwise apply the allocation ladder.
     function _settle(address agent, Book storage b, uint256 ethIn, uint256 usdcOut) internal {
         int256 pnl = int256(usdcOut) - int256(b.entryUsdc);
-        b.cumPnl += pnl;
-        b.trades += 1;
+        _record(b, pnl);
         b.entryUsdc = 0;
         b.entryTime = 0;
         uint256 profit; uint256 agentCut; uint256 firmCut;
@@ -445,6 +463,20 @@ contract AgentDesk {
         emit Exited(agent, ethIn, usdcOut, pnl, agentCut, firmCut, b.cumPnl);
         if (b.usdc <= _floor(b)) { _revoke(agent, b, true); return; }
         _rebalance(agent, b);
+    }
+
+    /// @dev Book the realized result of one closed trade into the record the ladder reads.
+    function _record(Book storage b, int256 pnl) internal {
+        b.cumPnl += pnl;
+        b.trades += 1;
+        if (pnl > 0) { b.wins += 1; b.grossProfit += uint256(pnl); }
+        else { b.losses += 1; b.grossLoss += uint256(-pnl); }
+    }
+
+    /// @dev Profit factor in bps: gross wins / gross losses. No losses yet → "infinite" (max).
+    function _profitFactorBps(Book storage b) internal view returns (uint256) {
+        if (b.grossLoss == 0) return b.grossProfit > 0 ? type(uint256).max : 0;
+        return b.grossProfit * 10_000 / b.grossLoss;
     }
 
     /// @dev The allocation ladder. Target multiplier from realized PnL, gated on beating a
@@ -493,14 +525,13 @@ contract AgentDesk {
             hurdle = int256(BASE_ALLOCATION * (spot - b.benchPrice) / b.benchPrice);
             hurdle = hurdle * int256(10_000 + ALPHA_MARGIN_BPS) / 10_000;
         }
-        bool beatsHold = b.cumPnl >= hurdle;
         int256 base = int256(BASE_ALLOCATION);
-        uint256 n = b.trades;
         mult = 1;
-        if (beatsHold) {
-            if (b.cumPnl >= base * int256(SCALE_T8_BPS) / 10_000 && n >= SCALE_MIN_TRADES * 3) mult = 8;
-            else if (b.cumPnl >= base * int256(SCALE_T4_BPS) / 10_000 && n >= SCALE_MIN_TRADES * 2) mult = 4;
-            else if (b.cumPnl >= base * int256(SCALE_T2_BPS) / 10_000 && n >= SCALE_MIN_TRADES) mult = 2;
+        if (b.cumPnl >= hurdle && b.trades >= SCALE_MIN_TRADES) {
+            uint256 pf = _profitFactorBps(b);
+            if (b.cumPnl >= base * int256(SCALE_T8_BPS) / 10_000 && pf >= SCALE_PF_T8_BPS) mult = 8;
+            else if (b.cumPnl >= base * int256(SCALE_T4_BPS) / 10_000 && pf >= SCALE_PF_T4_BPS) mult = 4;
+            else if (b.cumPnl >= base * int256(SCALE_T2_BPS) / 10_000 && pf >= SCALE_PF_T2_BPS) mult = 2;
         }
         if (mult > MAX_ALLOCATION_MULT) mult = MAX_ALLOCATION_MULT;
     }
@@ -574,6 +605,13 @@ contract AgentDesk {
         if (!b.active || b.eth == 0) return false;
         (uint256 mark, bool fresh) = _mark(b);
         return fresh && mark <= _floor(b);
+    }
+
+    /// @notice `agent`'s desk win ratio: profit factor (bps) and win rate (bps of closed trades).
+    function winRatio(address agent) external view returns (uint256 profitFactorBps, uint256 winRateBps) {
+        Book storage b = books[agent];
+        profitFactorBps = _profitFactorBps(b);
+        winRateBps = b.trades == 0 ? 0 : uint256(b.wins) * 10_000 / b.trades;
     }
 
     /// @notice The multiplier the ladder would target for `agent` now, and the buy-and-hold hurdle.

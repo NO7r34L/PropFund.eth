@@ -6,8 +6,8 @@ pragma solidity 0.8.26;
 // admit → wins → scale-ups → loss → scale-down → keeper liquidation — runs in seconds.
 //
 // Demo settings (NOT the production defaults in DeployDesk.s.sol):
-//   ladder tiers $10 / $25 / $50 realized (vs $100 / $250 / $600), 2 / 4 / 6 closed trades
-//   (vs 40 / 80 / 120), lens bar disabled (agent is preapproved). Everything else is production.
+//   ladder tiers $10 / $25 / $50 realized (vs $100 / $250 / $600), sample floor 2 closed trades
+//   (vs 20), lens bar disabled (agent is preapproved). Everything else is production.
 //
 // Required env: PRIVATE_KEY (firm/deployer), AGENT (address to preapprove)
 // Run:  forge script script/DemoDesk.s.sol:DemoDeskScript --rpc-url http://127.0.0.1:8546 --broadcast
@@ -61,7 +61,8 @@ contract DemoDeskScript is Script {
             scaleT4Bps: 500,     // $25           -> 4x   (demo; prod 5000 = $250)
             scaleT8Bps: 1000,    // $50           -> 8x   (demo; prod 12000 = $600)
             maxAllocationMult: 8,
-            scaleMinTrades: 2,   // 2 / 4 / 6 closed trades (demo; prod 40 / 80 / 120)
+            scaleMinTrades: 2,   // sample floor 2 closed trades (demo; prod 20)
+            scalePfT2Bps: 13_000, scalePfT4Bps: 15_000, scalePfT8Bps: 18_000,   // production win-ratio bars
             alphaMarginBps: 0
         }));
 
