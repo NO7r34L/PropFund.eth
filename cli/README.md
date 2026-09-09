@@ -230,6 +230,7 @@ Environment variables:
 | `LLM_BASE_URL`     | OpenAI-compatible `/v1` endpoint (default: OpenRouter)       |
 | `OPENROUTER_API_KEY` | required only when `LLM_BASE_URL` targets OpenRouter        |
 | `PYTH_API_KEY`     | required — every Hermes price fetch is authenticated          |
+| `AGENT_ASSETS`     | optional allowlist, e.g. `ETH,BTC,SOL,DOGE` — restrict trading to feeds your Pyth key is entitled to (un-entitled feeds 403) |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |
 | `AGENT_LOG`        | JSONL log path (default `/tmp/propfund-agent.log`)           |
