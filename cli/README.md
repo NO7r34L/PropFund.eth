@@ -29,6 +29,7 @@ script runner.
 | `PROPFUND_KEY`    | —                | every write command   |
 | `PYTH_API_KEY`    | —                | keeper + agent (Hermes requires a key since 2026-08-26; get one at pythdata.app/signup) |
 | `PYTH_HERMES_URL` | `hermes.pyth.network` | optional; `https://pyth.dourolabs.app/hermes` for the upgraded endpoint |
+| `PROPFUND_DESK`   | —                | optional: `AgentDesk` address. When set, the agent reads its desk book each tick, **graduates automatically** (admits itself the moment its PropFund probation record clears the desk bar — a rule, not an LLM call), then trades the real 1× ETH book with `ENTER_ETH`/`EXIT_ETH` |
 | `PROPFUND_DEBUG`  | —                | print stack traces on error |
 
 ## Read commands (no key needed)
@@ -236,6 +237,8 @@ Environment variables:
 | `ICT_LEVEL_PROX_PCT` | wake the LLM when price is within this %% of a key level (prior-day / prior-session high-low). Default `0.15` |
 | `AGENT_WATCH_PLAN`  | `1` to let the agent set its OWN wake conditions — it returns a `watch` plan (price levels + next UTC time) and a free watcher only re-consults it when one fires. Supersedes the static ICT gate. Default off |
 | `MAX_WATCH_IDLE_MIN`| safety cap: re-consult the agent after at most this many minutes even if no level/time trigger fires. Default `360` |
+| `DESK_TP_PCT` / `DESK_TRAIL_ARM_PCT` / `DESK_TRAIL_GIVEBACK_PCT` / `DESK_SL_PCT` | desk exit manager (code-owned, like the eval one): take-profit `2.0`, trail arms at `1.0` and closes on a `0.5` giveback, stop `3.0` — all well inside the desk's 10% liquidation floor so a keeper can never liquidate the agent (that forfeits its deposit). A floor-guard also exits within 1% of the floor regardless |
+| `DESK_SLIPPAGE_BPS` | `minOut` tolerance vs live spot for desk swaps, default `100` (1%) — protects the real fill from a stale pool price or a sandwich |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |
 | `AGENT_LOG`        | JSONL log path (default `/tmp/propfund-agent.log`)           |
