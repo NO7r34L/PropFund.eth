@@ -66,6 +66,23 @@ const EVAL_TIME_STOP_BLOCKS = Number(
 );
 const EVAL_DRAWDOWN_FAIL_BPS = 500;                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
+
+// --- ICT-style entry gating: spend an LLM call only when the market is actually in play ---
+// Fixed-interval polling asks the LLM every tick even at 3am in the middle of a dead range.
+// Instead, gate ENTRY decisions on two objective conditions: (a) session "killzones" — the
+// London and New York windows where crypto majors do most of their real movement — and (b)
+// price actually interacting with a pre-computed key level (prior-day / prior-session high &
+// low, where liquidity rests). Outside a killzone, or with price mid-range far from any level,
+// the tick cheap-skips with NO LLM call. Exits stay deterministic (already no LLM), so an open
+// trade's responsiveness is unaffected. Off by default (set ICT_ENTRY_GATE=1) so nothing
+// changes for existing deployments unless opted in.
+const ICT_ENTRY_GATE = process.env.ICT_ENTRY_GATE === '1';
+// UTC windows "HH:MM-HH:MM,..."; default = London Open + NY Open killzones. Empty = no time gate.
+const ICT_KILLZONES = (process.env.ICT_KILLZONES ?? '07:00-10:00,12:00-15:00')
+    .split(',').map(w => w.trim()).filter(Boolean)
+    .map(w => { const [a, b] = w.split('-'); const m = t => { const [h, mi] = t.split(':').map(Number); return h * 60 + mi; }; return [m(a), m(b)]; });
+// Wake the LLM when price is within this % of a key level (a level tag / potential reaction).
+const ICT_LEVEL_PROX_PCT = Number(process.env.ICT_LEVEL_PROX_PCT || 0.15);
 // msg.value sent with a router trade to cover the Pyth update fee (1 wei on Sepolia, ~hundreds on
 // Base). The router pays the exact fee and refunds the rest, so a comfortable buffer is free.
 const ROUTER_VALUE = BigInt(process.env.ROUTER_VALUE_WEI || 1_000_000);
@@ -350,6 +367,39 @@ const MIN_EDGE_SCORE = Number(process.env.EVAL_MIN_EDGE_SCORE || 0.50);
 // Build per-asset signals + a cross-asset ranking. Each asset has its own trend/momentum/range
 // for both 15m and 1h timeframes. The 1h is the higher-timeframe context — entries get a
 // confluence bonus when 15m and 1h trends agree, and a penalty when they fight.
+// Is `date` (UTC) inside any configured killzone window? Empty config = always true (gate off).
+function inKillzone(date, zones = ICT_KILLZONES) {
+    if (!zones.length) return true;
+    const mins = date.getUTCHours() * 60 + date.getUTCMinutes();
+    return zones.some(([a, b]) => a <= b ? (mins >= a && mins < b) : (mins >= a || mins < b));
+}
+
+// Objective key levels from 1h candles (newest-first): prior-day and prior-session highs/lows —
+// the levels liquidity rests at and price reacts to. Deliberately not the speculative ICT
+// constructs (FVGs, order blocks); just levels worth waking for.
+function computeKeyLevels(candles1h) {
+    if (!candles1h || candles1h.length < 8) return null;
+    const day = candles1h.slice(0, 24), sess = candles1h.slice(0, 8);
+    return {
+        prior_day_high: Math.max(...day.map(c => c.high)),
+        prior_day_low:  Math.min(...day.map(c => c.low)),
+        session_high:   Math.max(...sess.map(c => c.high)),
+        session_low:    Math.min(...sess.map(c => c.low)),
+    };
+}
+
+// Nearest key level to `spot` and its distance in %.
+function nearestLevel(spot, levels) {
+    if (!levels || !spot) return null;
+    let best = null;
+    for (const [name, v] of Object.entries(levels)) {
+        if (!(v > 0)) continue;
+        const distPct = Math.abs(spot - v) / spot * 100;
+        if (!best || distPct < best.distPct) best = { name, level: v, distPct };
+    }
+    return best;
+}
+
 function computeSignalsAcrossAssets(candleMap15m, candleMap1h, spotByAsset) {
     const out = {};
     for (const [sym, candles] of Object.entries(candleMap15m)) {
@@ -1000,6 +1050,34 @@ async function tick(ctx) {
             Object.fromEntries(state.assets.map(a => [a.name, Number(a.price)]))
           )
         : null;
+
+    // ICT entry gate: when flat and hunting an entry, only consult the (costly) LLM during a
+    // session killzone AND when price is tagging a key level. Otherwise cheap-skip — no LLM call.
+    if (ICT_ENTRY_GATE && !state.position) {
+        const now = new Date();
+        let skip = null, detail = {};
+        if (!inKillzone(now)) {
+            skip = 'outside-killzone';
+        } else {
+            const best = multiSignals?.best_long_setup;
+            if (!best) {
+                skip = 'no-long-setup';
+            } else {
+                const sym = best.asset;
+                const spot = Number(state.assets.find(a => a.name === sym)?.price || 0);
+                const near = nearestLevel(spot, computeKeyLevels(candleMap1h?.[sym]));
+                detail = { asset: sym, spot: spot ? spot.toFixed(4) : null,
+                    nearest: near ? { level: near.name, at: near.level.toFixed(4), distPct: Number(near.distPct.toFixed(3)) } : null };
+                if (!near || near.distPct > ICT_LEVEL_PROX_PCT) skip = 'no-level-in-range';
+            }
+        }
+        if (skip) {
+            log('EXEC', 'entry-gate-skip', { reason: skip, ...detail });
+            pushHistory('WAIT', null, { ok: true, action: 'WAIT' }, `ICT entry-gate: ${skip}`);
+            return;
+        }
+        log('EXEC', 'entry-gate-open', detail);
+    }
 
     // Prompt caching disabled. Anthropic prompt caching via OpenRouter's /chat/completions
     // endpoint doesn't deliver: empirically `cache_write_tokens` lands but `cached_tokens`
