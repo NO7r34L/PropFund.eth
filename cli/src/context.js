@@ -27,8 +27,14 @@ const ROUTER_ABI = [
 
 // AgentDesk — the real, firm-funded 1x ETH spot book. Wired only when net.deskAddr is set.
 const DESK_ABI = [
-    'function books(address) view returns (bool active, uint256 allocation, uint256 usdc, uint256 eth, uint256 deposit)',
+    'function getBook(address) view returns (tuple(bool active, uint256 allocation, uint256 usdc, uint256 eth, uint256 deposit, int256 cumPnl, uint256 entryUsdc, uint256 benchPrice, uint64 trades, uint64 entryTime))',
     'function bookValue(address) view returns (uint256 value, bool fresh)',
+    'function ladder(address) view returns (uint256 mult, int256 hurdle, bool fresh)',
+    'function BASE_ALLOCATION() view returns (uint256)',
+    'function MAX_ALLOCATION_MULT() view returns (uint256)',
+    'function agentCount() view returns (uint256)',
+    'function agents(uint256) view returns (address)',
+    'function liquidate(address agent)',
     'function drawdownFloor(address) view returns (uint256)',
     'function isLiquidatable(address) view returns (bool)',
     'function qualifies(address) view returns (bool)',

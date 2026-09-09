@@ -181,7 +181,12 @@ agent ──enterEth()──▶ USDC book → WETH (one spot pool)        agent 
    settle: out > allocation → profit split AGENT_SPLIT_BPS/firm, swept (book resets to allocation)
            out ≤ allocation → book shrinks
            book ≤ allocation·(1−MAX_DRAWDOWN_BPS) → revoke: book→firmIdle, deposit→firmProfit
+   ladder (after settle): mult ∈ {1,2,4,8} from cumPnl ≥ SCALE_T*_BPS·base, trades ≥ SCALE_MIN_TRADES·{1,2,3},
+           cumPnl ≥ base·max(0, spot/benchPrice − 1)   [beats buy-and-hold]
+           up:   firmIdle → book (capped by firmIdle and by (deposit+earned)/MAX_DRAWDOWN); earned → deposit shortfall
+           down: book excess → firmIdle; deposit excess → earned
 anyone ──liquidate(agent)──▶ open book marked at Pyth ≤ floor → forced exit (fill ≥ mark·0.98), revoke
+keeper ──sweep──▶ walks desk.agents, calls liquidate on any isLiquidatable book (same tick as PropFund's paths)
 ```
 
 Money never leaves the desk except: firm pulls idle / firm profit; agent pulls earned share or a

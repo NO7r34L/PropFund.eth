@@ -17,10 +17,27 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 ///             Its only actions are enterEth (all-in to WETH) and exitEth (all-out to USDC) through
 ///             one deep spot pool. 1x, long-only. No leverage means no liquidation engine, no
 ///             funding, no margin — the only risk is ETH price, bounded by the drawdown rule.
-///           - Realized profit above the allocation splits agent/firm and is swept out, so the
+///           - Realized profit above the allocation splits agent/firm and is swept, so the
 ///             book stays at its allocation. Losses shrink the book; breach the drawdown floor and
 ///             the book is closed, the agent's deposit forfeited. Anyone can liquidate an open
 ///             ETH position that has breached (keepers compete on gas).
+///
+///         What makes it a FIRM rather than a lottery — capital concentrates in proven edge:
+///           - ALLOCATION SCALES with realized desk PnL (1x → 2x → 4x → 8x of the base book), and
+///             scales back down on losses. A flat allocation caps the right tail at one book; the
+///             whole prop-firm thesis is riding the winners, so the book must be able to grow.
+///           - ...but only on a TRACK RECORD, not a lucky trade. Each tier also needs a minimum
+///             number of closed desk trades (SCALE_MIN_TRADES × 1/2/3). A 1000-agent simulation
+///             (analysis/desk_sim.py) showed that without this the ladder scales noise as often as
+///             skill and costs the firm money; with it the ladder is net positive in every regime.
+///           - ...but ONLY FOR ALPHA OVER HOLDING. Long-only timing in a bull market "profits" by
+///             beta — the firm could have earned that by holding ETH. To scale, an agent's realized
+///             desk PnL must exceed what a base-sized buy-and-hold of ETH made since its admission
+///             (a hurdle that is zero when ETH is down, so beating the market by staying out counts).
+///           - ...and the firm STAYS COLLATERALIZED at every tier. The deposit must always cover
+///             the firm's maximum loss on the book (allocation x drawdown). Scaling up draws the
+///             shortfall from the agent's own unclaimed winnings; if those can't cover it, the
+///             scale-up is capped. A blow-up at any tier makes the firm whole.
 ///         The firm's economics are the firm's own risk-managed bet — exactly what founding a
 ///         prop firm is — not a promise to third parties.
 /// @dev PropFund is read-only from here. Cancun transient storage for reentrancy.
@@ -34,6 +51,7 @@ contract AgentDesk {
     error NotOwner();
     error ZeroAmount();
     error ZeroAddress();
+    error BadConfig();
     error Paused();
     error Reentrancy();
     error AlreadyActive();
@@ -57,9 +75,11 @@ contract AgentDesk {
     event FirmProfitWithdrawn(uint256 amount);
     event PauseSet(bool paused);
     event Preapproved(address indexed agent, bool approved);
-    event Admitted(address indexed agent, uint256 allocation, uint256 deposit, bool viaLens);
+    event Admitted(address indexed agent, uint256 allocation, uint256 deposit, bool viaLens, uint256 benchPrice);
     event Entered(address indexed agent, uint256 usdcIn, uint256 ethOut);
-    event Exited(address indexed agent, uint256 ethIn, uint256 usdcOut, uint256 profit, uint256 agentCut, uint256 firmCut);
+    event Exited(address indexed agent, uint256 ethIn, uint256 usdcOut, int256 pnl, uint256 agentCut, uint256 firmCut, int256 cumPnl);
+    /// @notice Allocation changed. `hurdle` is the buy-and-hold profit the agent had to beat.
+    event Scaled(address indexed agent, uint256 oldAllocation, uint256 newAllocation, uint256 mult, int256 cumPnl, int256 hurdle);
     event Liquidated(address indexed agent, address indexed liquidator, uint256 markValue, uint256 usdcOut);
     event Revoked(address indexed agent, uint256 bookReturned, uint256 deposit, bool forfeited);
     event Resigned(address indexed agent);
@@ -78,9 +98,10 @@ contract AgentDesk {
     IPropFundLens public immutable LENS;
     ISwapVenue public immutable VENUE;
 
-    /// @notice USDC book each admitted agent starts with (6dp).
+    /// @notice USDC book each admitted agent starts with (6dp). Tier 1.
     uint256 public immutable BASE_ALLOCATION;
-    /// @notice Agent's skin-in-the-game, escrowed on admission (6dp). Forfeited on a drawdown breach.
+    /// @notice Agent's skin-in-the-game, escrowed on admission (6dp). Must cover the base tier's
+    ///         maximum loss (BASE_ALLOCATION x MAX_DRAWDOWN_BPS). Forfeited on a drawdown breach.
     uint256 public immutable AGENT_DEPOSIT;
     /// @notice Book value at or below allocation × (1 − this) closes the book. bps.
     uint256 public immutable MAX_DRAWDOWN_BPS;
@@ -89,8 +110,23 @@ contract AgentDesk {
     /// @notice Admission bar read from the PropFund lens (virtual probation record).
     int256  public immutable MIN_CUM_PNL;
     uint256 public immutable MIN_TRADES;
+    /// @notice Admission: totalProfit / totalLoss must be at least this (bps; 0 = disabled).
+    ///         A cheap regime-robustness add — a lucky long-only pass in a bull market still has to
+    ///         have kept its losers small relative to its winners.
+    uint256 public immutable MIN_PROFIT_FACTOR_BPS;
     /// @notice Pyth freshness window for marking an open ETH book.
     uint256 public immutable STALE_AFTER;
+
+    /// @notice Allocation ladder: realized desk PnL (as bps of BASE_ALLOCATION) that unlocks 2x/4x/8x.
+    uint256 public immutable SCALE_T2_BPS;
+    uint256 public immutable SCALE_T4_BPS;
+    uint256 public immutable SCALE_T8_BPS;
+    /// @notice Hard cap on the allocation multiplier (≤ 8).
+    uint256 public immutable MAX_ALLOCATION_MULT;
+    /// @notice Closed desk trades required for 2x; 4x needs 2×, 8x needs 3× this. A track record.
+    uint256 public immutable SCALE_MIN_TRADES;
+    /// @notice To scale, realized PnL must beat a base-sized buy-and-hold of ETH by this margin (bps).
+    uint256 public immutable ALPHA_MARGIN_BPS;
 
     /// @notice Reject Pyth reads whose conf exceeds 0.5% of price (mirrors PropFund).
     uint256 internal constant MAX_CONF_BPS = 50;
@@ -109,7 +145,12 @@ contract AgentDesk {
         uint256 allocation;   // the USDC the agent is trusted with; profits above it are swept
         uint256 usdc;         // book currently held as USDC (0 while in ETH)
         uint256 eth;          // book currently held as WETH (0 while in USDC)
-        uint256 deposit;      // agent's escrowed skin-in-the-game
+        uint256 deposit;      // agent's escrowed skin-in-the-game (always ≥ allocation × drawdown)
+        int256  cumPnl;       // cumulative REALIZED desk PnL — drives the allocation ladder
+        uint256 entryUsdc;    // USDC that went into the current ETH position (exact PnL basis)
+        uint256 benchPrice;   // ETH spot (1e8) at admission — the buy-and-hold benchmark start
+        uint64  trades;       // closed desk trades (exits + liquidations) — the track record
+        uint64  entryTime;    // block.timestamp of the current ETH entry (0 while in USDC)
     }
 
     /// @notice Firm USDC not allocated to any book.
@@ -119,7 +160,8 @@ contract AgentDesk {
     bool public paused;
 
     mapping(address => Book) public books;
-    /// @notice Agent's withdrawable profit share (pull-pattern).
+    /// @notice Agent's withdrawable profit share (pull-pattern). Also the source of extra
+    ///         collateral when a book scales up.
     mapping(address => uint256) public earned;
     /// @notice Firm discretion: admit an agent regardless of the lens bar (bootstrap / judgment).
     mapping(address => bool) public preapproved;
@@ -162,7 +204,14 @@ contract AgentDesk {
         uint256 agentSplitBps;
         int256  minCumPnl;
         uint256 minTrades;
+        uint256 minProfitFactorBps;
         uint256 staleAfter;
+        uint256 scaleT2Bps;
+        uint256 scaleT4Bps;
+        uint256 scaleT8Bps;
+        uint256 maxAllocationMult;
+        uint256 scaleMinTrades;
+        uint256 alphaMarginBps;
     }
 
     constructor(Config memory c) {
@@ -172,6 +221,10 @@ contract AgentDesk {
         }
         if (c.baseAllocation == 0 || c.maxDrawdownBps == 0 || c.maxDrawdownBps >= 10_000
             || c.agentSplitBps > 10_000 || c.staleAfter == 0) revert ZeroAmount();
+        // The base tier must be fully collateralized: a blow-up at 1x makes the firm whole.
+        if (c.agentDeposit < c.baseAllocation * c.maxDrawdownBps / 10_000) revert BadConfig();
+        if (c.maxAllocationMult == 0 || c.maxAllocationMult > 8) revert BadConfig();
+        if (!(c.scaleT2Bps < c.scaleT4Bps && c.scaleT4Bps < c.scaleT8Bps)) revert BadConfig();
         OWNER = c.owner;
         USDC = c.usdc;
         WETH = c.weth;
@@ -185,7 +238,14 @@ contract AgentDesk {
         AGENT_SPLIT_BPS = c.agentSplitBps;
         MIN_CUM_PNL = c.minCumPnl;
         MIN_TRADES = c.minTrades;
+        MIN_PROFIT_FACTOR_BPS = c.minProfitFactorBps;
         STALE_AFTER = c.staleAfter;
+        SCALE_T2_BPS = c.scaleT2Bps;
+        SCALE_T4_BPS = c.scaleT4Bps;
+        SCALE_T8_BPS = c.scaleT8Bps;
+        MAX_ALLOCATION_MULT = c.maxAllocationMult;
+        SCALE_MIN_TRADES = c.scaleMinTrades;
+        ALPHA_MARGIN_BPS = c.alphaMarginBps;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -239,11 +299,17 @@ contract AgentDesk {
         if (preapproved[agent]) return true;
         IPropFundLens.TraderStats memory s = LENS.getTraderStats(agent);
         uint256 trades = uint256(s.wins) + uint256(s.losses);
-        return s.cumulativePnl >= MIN_CUM_PNL && trades >= MIN_TRADES;
+        if (s.cumulativePnl < MIN_CUM_PNL || trades < MIN_TRADES) return false;
+        if (MIN_PROFIT_FACTOR_BPS > 0) {
+            if (s.totalLoss == 0) return s.totalProfit > 0;
+            if (s.totalProfit * 10_000 / s.totalLoss < MIN_PROFIT_FACTOR_BPS) return false;
+        }
+        return true;
     }
 
     /// @notice Admit yourself. Requires a qualifying record (or preapproval), the agent deposit,
-    ///         and enough idle firm capital for one base allocation. Permissionless — a rule.
+    ///         enough idle firm capital for one base allocation, and a fresh ETH mark (it becomes
+    ///         your buy-and-hold benchmark). Permissionless — a rule.
     function admit() external nonReentrant {
         if (paused) revert Paused();
         Book storage b = books[msg.sender];
@@ -251,6 +317,8 @@ contract AgentDesk {
         bool viaLens = !preapproved[msg.sender];
         if (!qualifies(msg.sender)) revert NotQualified();
         if (firmIdle < BASE_ALLOCATION) revert InsufficientIdle();
+        (uint256 spot, bool fresh) = _ethSpot();
+        if (!fresh) revert StaleOracle();
 
         // EFFECTS
         firmIdle -= BASE_ALLOCATION;
@@ -259,11 +327,16 @@ contract AgentDesk {
         b.usdc = BASE_ALLOCATION;
         b.eth = 0;
         b.deposit = AGENT_DEPOSIT;
+        b.cumPnl = 0;
+        b.entryUsdc = 0;
+        b.benchPrice = spot;
+        b.trades = 0;
+        b.entryTime = 0;
         agents.push(msg.sender);
 
         // INTERACTIONS
         if (AGENT_DEPOSIT > 0) USDC.safeTransferFrom(msg.sender, address(this), AGENT_DEPOSIT);
-        emit Admitted(msg.sender, BASE_ALLOCATION, AGENT_DEPOSIT, viaLens);
+        emit Admitted(msg.sender, BASE_ALLOCATION, AGENT_DEPOSIT, viaLens, spot);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -280,6 +353,8 @@ contract AgentDesk {
         if (amountIn == 0) revert ZeroAmount();
 
         b.usdc = 0;  // effects before the external swap
+        b.entryUsdc = amountIn;
+        b.entryTime = uint64(block.timestamp);
         USDC.approve(address(VENUE), amountIn);
         uint256 out = VENUE.swapExactIn(address(USDC), address(WETH), amountIn, minOut, address(this));
         b.eth = out;
@@ -288,7 +363,7 @@ contract AgentDesk {
 
     /// @notice All-out: swap the whole WETH book back to USDC and settle. Profit above the
     ///         allocation is split agent/firm and swept; a loss shrinks the book; a drawdown
-    ///         breach closes it and forfeits the deposit.
+    ///         breach closes it and forfeits the deposit. Then the allocation ladder is applied.
     function exitEth(uint256 minOut) external nonReentrant {
         Book storage b = books[msg.sender];
         if (!b.active) revert NotActive();
@@ -318,6 +393,8 @@ contract AgentDesk {
         WETH.approve(address(VENUE), ethIn);
         uint256 out = VENUE.swapExactIn(address(WETH), address(USDC), ethIn, minOut, address(this));
         emit Liquidated(agent, msg.sender, mark, out);
+        b.cumPnl += int256(out) - int256(b.entryUsdc);
+        b.trades += 1;
         b.usdc = out;
         _revoke(agent, b, true);
     }
@@ -345,9 +422,15 @@ contract AgentDesk {
                                 INTERNALS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Settle a USDC exit: split profit above allocation, sweep the book back to it;
-    ///      or absorb a loss into the book and close on a drawdown breach.
+    /// @dev Settle a USDC exit: realize PnL against the exact entry basis, split profit above the
+    ///      allocation and sweep the book back to it, or absorb a loss; close on a drawdown
+    ///      breach; otherwise apply the allocation ladder.
     function _settle(address agent, Book storage b, uint256 ethIn, uint256 usdcOut) internal {
+        int256 pnl = int256(usdcOut) - int256(b.entryUsdc);
+        b.cumPnl += pnl;
+        b.trades += 1;
+        b.entryUsdc = 0;
+        b.entryTime = 0;
         uint256 profit; uint256 agentCut; uint256 firmCut;
         if (usdcOut > b.allocation) {
             profit = usdcOut - b.allocation;
@@ -359,8 +442,67 @@ contract AgentDesk {
         } else {
             b.usdc = usdcOut;                  // loss stays in the book
         }
-        emit Exited(agent, ethIn, usdcOut, profit, agentCut, firmCut);
-        if (b.usdc <= _floor(b)) _revoke(agent, b, true);
+        emit Exited(agent, ethIn, usdcOut, pnl, agentCut, firmCut, b.cumPnl);
+        if (b.usdc <= _floor(b)) { _revoke(agent, b, true); return; }
+        _rebalance(agent, b);
+    }
+
+    /// @dev The allocation ladder. Target multiplier from realized PnL, gated on beating a
+    ///      base-sized buy-and-hold of ETH since admission. Scale-ups draw capital from firmIdle
+    ///      (capped by what's available) and top up the deposit from the agent's unclaimed
+    ///      winnings so the firm stays collateralized (capped by what those can cover). Scale-downs
+    ///      return the excess book to the firm and release excess deposit back to the agent.
+    ///      No change on a stale mark.
+    function _rebalance(address agent, Book storage b) internal {
+        (uint256 mult, int256 hurdle, bool fresh) = _targetMult(b);
+        if (!fresh) return;
+        uint256 target = BASE_ALLOCATION * mult;
+        uint256 oldAlloc = b.allocation;
+        if (target > oldAlloc) {
+            uint256 add = target - oldAlloc;
+            if (add > firmIdle) { add = firmIdle; target = oldAlloc + add; }
+            // Collateral: deposit must cover target × drawdown. Shortfall comes from `earned`.
+            uint256 reqDep = target * MAX_DRAWDOWN_BPS / 10_000;
+            if (b.deposit < reqDep) {
+                uint256 coverable = (b.deposit + earned[agent]) * 10_000 / MAX_DRAWDOWN_BPS;
+                if (coverable < target) { target = coverable; add = target > oldAlloc ? target - oldAlloc : 0; reqDep = target * MAX_DRAWDOWN_BPS / 10_000; }
+                if (b.deposit < reqDep) { uint256 short = reqDep - b.deposit; earned[agent] -= short; b.deposit += short; }
+            }
+            if (add == 0) return;
+            firmIdle -= add;
+            b.usdc += add;
+            b.allocation = target;
+            emit Scaled(agent, oldAlloc, target, mult, b.cumPnl, hurdle);
+        } else if (target < oldAlloc) {
+            b.allocation = target;
+            if (b.usdc > target) { uint256 back = b.usdc - target; b.usdc = target; firmIdle += back; }
+            uint256 reqDep = target * MAX_DRAWDOWN_BPS / 10_000;
+            if (b.deposit > reqDep) { uint256 rel = b.deposit - reqDep; b.deposit = reqDep; earned[agent] += rel; }
+            emit Scaled(agent, oldAlloc, target, mult, b.cumPnl, hurdle);
+        }
+    }
+
+    /// @dev Multiplier the ladder targets right now, and the buy-and-hold hurdle it had to beat.
+    function _targetMult(Book storage b) internal view returns (uint256 mult, int256 hurdle, bool fresh) {
+        uint256 spot;
+        (spot, fresh) = _ethSpot();
+        if (!fresh) return (0, 0, false);
+        // Beta hurdle: what a BASE-sized hold of ETH made since admission. Zero when ETH is down —
+        // being flat through a drawdown beats holding, and that counts.
+        if (spot > b.benchPrice && b.benchPrice > 0) {
+            hurdle = int256(BASE_ALLOCATION * (spot - b.benchPrice) / b.benchPrice);
+            hurdle = hurdle * int256(10_000 + ALPHA_MARGIN_BPS) / 10_000;
+        }
+        bool beatsHold = b.cumPnl >= hurdle;
+        int256 base = int256(BASE_ALLOCATION);
+        uint256 n = b.trades;
+        mult = 1;
+        if (beatsHold) {
+            if (b.cumPnl >= base * int256(SCALE_T8_BPS) / 10_000 && n >= SCALE_MIN_TRADES * 3) mult = 8;
+            else if (b.cumPnl >= base * int256(SCALE_T4_BPS) / 10_000 && n >= SCALE_MIN_TRADES * 2) mult = 4;
+            else if (b.cumPnl >= base * int256(SCALE_T2_BPS) / 10_000 && n >= SCALE_MIN_TRADES) mult = 2;
+        }
+        if (mult > MAX_ALLOCATION_MULT) mult = MAX_ALLOCATION_MULT;
     }
 
     /// @dev Close a book: return its USDC to the firm; forfeit or return the deposit.
@@ -371,6 +513,8 @@ contract AgentDesk {
         b.usdc = 0;
         b.eth = 0;
         b.deposit = 0;
+        b.entryUsdc = 0;
+        b.entryTime = 0;
         firmIdle += returned;
         if (forfeit) {
             firmProfit += dep;
@@ -384,23 +528,35 @@ contract AgentDesk {
         return b.allocation * (10_000 - MAX_DRAWDOWN_BPS) / 10_000;
     }
 
-    /// @dev Mark the book in USDC. In USDC it's exact; in ETH it's ETH × Pyth spot, with the
-    ///      same freshness + confidence guards PropFund uses.
-    function _mark(Book storage b) internal view returns (uint256 value, bool fresh) {
-        if (b.eth == 0) return (b.usdc, true);
+    /// @dev Fresh ETH spot (1e8) with PropFund's freshness + confidence guards.
+    function _ethSpot() internal view returns (uint256 price, bool fresh) {
         IPyth.Price memory p = PYTH.getPriceUnsafe(ETH_PRICE_ID);
         if (p.price <= 0) return (0, false);
-        uint256 price = uint256(uint64(p.price));
+        price = uint256(uint64(p.price));
         if (p.publishTime == 0 || p.publishTime > block.timestamp || block.timestamp - p.publishTime > STALE_AFTER) {
-            return (0, false);
+            return (price, false);
         }
-        if (uint256(p.conf) * 10_000 > price * MAX_CONF_BPS) return (0, false);
+        if (uint256(p.conf) * 10_000 > price * MAX_CONF_BPS) return (price, false);
+        return (price, true);
+    }
+
+    /// @dev Mark the book in USDC. In USDC it's exact; in ETH it's ETH × fresh Pyth spot.
+    function _mark(Book storage b) internal view returns (uint256 value, bool fresh) {
+        if (b.eth == 0) return (b.usdc, true);
+        uint256 price;
+        (price, fresh) = _ethSpot();
+        if (!fresh) return (0, false);
         return (b.eth * price / ETH_PRICE_TO_USDC, true);
     }
 
     /*//////////////////////////////////////////////////////////////
                                   VIEWS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice The whole book as a struct (the auto-generated `books` getter is a 10-field tuple).
+    function getBook(address agent) external view returns (Book memory) {
+        return books[agent];
+    }
 
     /// @notice Current book value in USDC (marked at Pyth if in ETH) and whether the mark is fresh.
     function bookValue(address agent) external view returns (uint256 value, bool fresh) {
@@ -418,6 +574,11 @@ contract AgentDesk {
         if (!b.active || b.eth == 0) return false;
         (uint256 mark, bool fresh) = _mark(b);
         return fresh && mark <= _floor(b);
+    }
+
+    /// @notice The multiplier the ladder would target for `agent` now, and the buy-and-hold hurdle.
+    function ladder(address agent) external view returns (uint256 mult, int256 hurdle, bool fresh) {
+        return _targetMult(books[agent]);
     }
 
     function agentCount() external view returns (uint256) {

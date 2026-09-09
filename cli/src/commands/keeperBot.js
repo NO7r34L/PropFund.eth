@@ -5,6 +5,8 @@
 //   2. executeExit() any position whose TP/SL has hit at the current oracle price
 //   3. forceClose() any position older than MAX_POSITION_BLOCKS (~14d)
 //   4. processFundingQueue() when capacity exists and the queue isn't empty
+//   5. AgentDesk.liquidate() any graduated agent whose open ETH book has breached its
+//      drawdown floor (only when a desk is wired for the network)
 //
 // Runs as either a daemon (`keeper run`) or a one-shot pass (`keeper sweep`).
 // Failed txs are logged and skipped — racing keepers are expected.
@@ -102,6 +104,17 @@ async function detectWork(propfund, json) {
     return { work, traders, assets };
 }
 
+// Desk detection: walk the desk's agent list; the contract's isLiquidatable() view does the
+// marking (fresh Pyth + conf guards), so this is one read per agent, no client-side price math.
+async function detectDeskWork(desk) {
+    if (!desk) return { deskLiquidate: [], deskAgents: 0 };
+    const count = await desk.agentCount();
+    const agents = [];
+    for (let i = 0n; i < count; i++) agents.push(await desk.agents(i));
+    const flags = await Promise.all(agents.map(a => desk.isLiquidatable(a)));
+    return { deskLiquidate: agents.filter((_, i) => flags[i]), deskAgents: agents.length };
+}
+
 // Action: send the tx for one work item, decode any revert, return a structured result.
 async function actOne(propfund, kind, target, json) {
     try {
@@ -110,6 +123,7 @@ async function actOne(propfund, kind, target, json) {
         else if (kind === 'execExit') tx = await propfund.executeExit(target);
         else if (kind === 'forceClose') tx = await propfund.forceClose(target);
         else if (kind === 'processQueue') tx = await propfund.processFundingQueue(target);  // target = max
+        else if (kind === 'deskLiquidate') tx = await propfund.liquidate(target);           // propfund = desk here
         else throw new Error(`unknown kind ${kind}`);
 
         const receipt = await tx.wait();
@@ -121,7 +135,7 @@ async function actOne(propfund, kind, target, json) {
 }
 
 // One pass: detect, gate, act, summarize.
-async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, json }) {
+async function tick({ propfund, desk, provider, wallet, network, dryRun, maxGasGwei, json }) {
     const startedAt = Date.now();
 
     // Operational gates: refuse to act when the wallet is too low on ETH or gas is spiking.
@@ -137,7 +151,10 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
         return { skipped: 'gas-too-high', currentGwei, maxGasGwei };
     }
 
-    const { work, traders } = await detectWork(propfund, json);
+    const [{ work, traders }, { deskLiquidate, deskAgents }] = await Promise.all([
+        detectWork(propfund, json),
+        detectDeskWork(desk),
+    ]);
 
     // Queue-process is independent of the per-trader work list — check separately.
     const [queueLength, canFundNow] = await Promise.all([
@@ -146,7 +163,6 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
     ]);
     const queueCandidates = (queueLength > 0n && canFundNow) ? [10n] : [];
 
-    const totalActions = work.liquidate.length + work.execExit.length + work.forceClose.length + queueCandidates.length;
 
     if (dryRun) {
         return {
@@ -158,6 +174,8 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
             wouldProcessQueue: queueCandidates.length > 0,
             queueLength: queueLength.toString(),
             canFundNow,
+            deskAgentsScanned: deskAgents,
+            wouldDeskLiquidate: deskLiquidate,
         };
     }
 
@@ -165,7 +183,7 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
     // liquidate / executeExit / forceClose all read spot — without a fresh push they'd see
     // whatever the cached on-chain price is, which can be minutes stale.
     let pythPushed = null;
-    const needsFreshPrice = work.liquidate.length + work.execExit.length + work.forceClose.length > 0;
+    const needsFreshPrice = work.liquidate.length + work.execExit.length + work.forceClose.length + deskLiquidate.length > 0;
     if (needsFreshPrice && network) {
         try { pythPushed = await refreshPyth(propfund, network); }
         catch (e) {
@@ -181,6 +199,7 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
         ...work.execExit.map(t => actOne(propfund, 'execExit', t)),
         ...work.forceClose.map(t => actOne(propfund, 'forceClose', t)),
         ...queueCandidates.map(max => actOne(propfund, 'processQueue', max)),
+        ...deskLiquidate.map(a => actOne(desk, 'deskLiquidate', a)),
     ];
     const results = actions.length > 0 ? await Promise.all(actions) : [];
 
@@ -191,6 +210,7 @@ async function tick({ propfund, provider, wallet, network, dryRun, maxGasGwei, j
         tick: 'done',
         elapsedMs: Date.now() - startedAt,
         tradersScanned: traders.length,
+        deskAgentsScanned: deskAgents,
         balanceEth: formatUnits(balance, 18),
         gasGwei: currentGwei,
         pythPushed,
@@ -211,15 +231,16 @@ function logTickSummary(net, summary) {
         return;
     }
     if (summary.tick === 'dry-run') {
-        const counts = `liq=${summary.wouldLiquidate.length} exit=${summary.wouldExecExit.length} force=${summary.wouldForceClose.length} queue=${summary.wouldProcessQueue ? 'yes' : 'no'}`;
-        process.stdout.write(`[keeper:dry] ${summary.tradersScanned} traders scanned — ${counts}\n`);
+        const counts = `liq=${summary.wouldLiquidate.length} exit=${summary.wouldExecExit.length} force=${summary.wouldForceClose.length} queue=${summary.wouldProcessQueue ? 'yes' : 'no'} desk-liq=${summary.wouldDeskLiquidate.length}`;
+        process.stdout.write(`[keeper:dry] ${summary.tradersScanned} traders + ${summary.deskAgentsScanned} desk agents scanned — ${counts}\n`);
+        for (const t of summary.wouldDeskLiquidate) process.stdout.write(`  would desk-liquidate ${t}\n`);
         for (const t of summary.wouldLiquidate)  process.stdout.write(`  would liquidate ${t}\n`);
         for (const t of summary.wouldExecExit)   process.stdout.write(`  would exec-exit ${t}\n`);
         for (const t of summary.wouldForceClose) process.stdout.write(`  would force-close ${t}\n`);
         return;
     }
     const t = summary;
-    process.stdout.write(`[keeper] ${t.tradersScanned} scanned in ${t.elapsedMs}ms — ${t.succeeded}/${t.attempted} ok, ${t.failed} failed (gas ${t.gasGwei ?? '?'} gwei, bal ${Number(t.balanceEth).toFixed(4)} ETH)\n`);
+    process.stdout.write(`[keeper] ${t.tradersScanned} traders + ${t.deskAgentsScanned} desk agents scanned in ${t.elapsedMs}ms — ${t.succeeded}/${t.attempted} ok, ${t.failed} failed (gas ${t.gasGwei ?? '?'} gwei, bal ${Number(t.balanceEth).toFixed(4)} ETH)\n`);
     for (const r of t.results) {
         if (r.ok) process.stdout.write(`  ✓ ${r.kind} ${r.target} — block ${r.blockNumber} tx ${r.txHash}\n`);
         else      process.stderr.write(`  ✗ ${r.kind} ${r.target} — ${r.error}\n`);
@@ -228,13 +249,13 @@ function logTickSummary(net, summary) {
 
 // `propfund keeper sweep` — one-shot: detect, act, exit. Useful for cron.
 export async function keeperSweep(args) {
-    const { net, propfund, provider, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
+    const { net, propfund, desk, provider, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
     const dryRun = Boolean(flag(args, 'dry-run', false));
     const maxGasGwei = flag(args, 'max-gas-gwei', null);
     const json = isJson(args);
 
     const summary = await tick({
-        propfund, provider, wallet, network: net,
+        propfund, desk, provider, wallet, network: net,
         dryRun,
         maxGasGwei: maxGasGwei != null ? Number(maxGasGwei) : null,
         json,
@@ -246,7 +267,7 @@ export async function keeperSweep(args) {
 
 // `propfund keeper run` — daemon: tick every --interval seconds until SIGINT.
 export async function keeperRun(args) {
-    const { net, propfund, provider, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
+    const { net, propfund, desk, provider, wallet } = buildContext({ requireSigner: true, network: args.flags.network });
     const interval = Number(flag(args, 'interval', 30));
     const dryRun = Boolean(flag(args, 'dry-run', false));
     const maxGasGwei = flag(args, 'max-gas-gwei', null);
@@ -279,7 +300,7 @@ export async function keeperRun(args) {
         cycle++;
         try {
             const summary = await runWithWatchdog(() => tick({
-                propfund, provider, wallet, network: net,
+                propfund, desk, provider, wallet, network: net,
                 dryRun,
                 maxGasGwei: maxGasGwei != null ? Number(maxGasGwei) : null,
                 json,
