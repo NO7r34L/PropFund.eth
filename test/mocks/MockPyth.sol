@@ -28,8 +28,16 @@ contract MockPyth is IPyth {
         return _prices[id];
     }
 
+    /// @notice Test helper — queue a price that the next updatePriceFeeds() applies (simulates a
+    ///         signed update landing). Unset = updatePriceFeeds stays a no-op.
+    bytes32 internal _pendingId; int64 internal _pendingPrice; bool internal _hasPending;
+    function setNextUpdate(bytes32 id, int256 priceE8) external { _pendingId = id; _pendingPrice = int64(priceE8); _hasPending = true; }
+
     function updatePriceFeeds(bytes[] calldata) external payable override {
-        // no-op in tests; setPrice / setSpotE8 set state directly
+        if (_hasPending) {
+            _prices[_pendingId] = Price({ price: _pendingPrice, conf: 0, expo: -8, publishTime: block.timestamp });
+            _hasPending = false;
+        }
     }
 
     function getUpdateFee(bytes[] calldata) external pure override returns (uint256) {

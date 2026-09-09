@@ -19,6 +19,15 @@ contract MockFlashBorrower is IERC3156FlashBorrower {
         lender.flashLoan(this, token, amount, "");
     }
 
+    /// @notice Oracle-fresh borrow: forwards msg.value as the Pyth fee (excess comes back here).
+    function borrowWithUpdate(address desk, address token, uint256 amount, bytes[] calldata priceUpdate) external payable {
+        (bool ok, bytes memory ret) = desk.call{value: msg.value}(
+            abi.encodeWithSignature("flashLoanWithUpdate(address,address,uint256,bytes[],bytes)", address(this), token, amount, priceUpdate, "")
+        );
+        if (!ok) { assembly { revert(add(ret, 32), mload(ret)) } }
+    }
+    receive() external payable {}
+
     function onFlashLoan(address, address token, uint256 amount, uint256 fee, bytes calldata) external returns (bytes32) {
         lastAmount = amount; lastFee = fee;
         if (mode == Mode.Reenter) {

@@ -762,6 +762,64 @@ contract AgentDeskTest is Test {
         b.borrow(IERC3156FlashLender(address(desk)), address(usdc), 1_000e6);
     }
 
+    /*//////////////////////////// oracle-fresh flash loans ////////////////////////////*/
+
+    /// @notice The update lands BEFORE the loan: the borrower's callback (and every other protocol
+    ///         reading this Pyth) sees the fresh price. Fee to firmProfit; Pyth fee overpayment refunded.
+    function test_flashWithUpdate_pushesPriceThenLends_refundsExcess() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        vm.deal(address(b), 1 ether);
+        pyth.setSpotE8(ETH_ID, 2500e8);
+        pyth.setNextUpdate(ETH_ID, 2300e8);               // the "signed update" says -8%
+        bytes[] memory upd = new bytes[](1); upd[0] = hex"deadbeef";
+        _admit(agent); _enter(desk, agent);
+        vm.warp(block.timestamp + 10 minutes);            // the cached price is now stale for the desk
+        (, bool freshBefore) = desk.bookValue(agent);
+        uint256 balBefore = address(b).balance;
+        b.borrowWithUpdate{value: 0.01 ether}(address(desk), address(usdc), 5_000e6, upd);
+        // price applied at this block, so the desk's mark is fresh again and at the new price
+        IPyth.Price memory p = pyth.getPriceUnsafe(ETH_ID);
+        assertEq(uint256(uint64(p.price)), 2300e8); assertEq(p.publishTime, block.timestamp);
+        assertEq(desk.firmProfit(), 2.5e6);                // 5 bps of $5,000
+        // the test sent 0.01 ETH into the borrower; MockPyth's fee is 1 wei; the desk refunded the rest
+        assertEq(address(b).balance, balBefore + 0.01 ether - 1);
+        assertEq(address(desk).balance, 0);
+        assertFalse(freshBefore);                          // it WAS stale before the update landed
+    }
+
+    function test_flashWithUpdate_noUpdate_isPlainLoan() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        bytes[] memory upd = new bytes[](0);
+        b.borrowWithUpdate(address(desk), address(usdc), 1_000e6, upd);
+        assertEq(desk.firmProfit(), 0.5e6);
+    }
+
+    function test_flashWithUpdate_underpaidOracleFee_reverts() public {
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        bytes[] memory upd = new bytes[](1); upd[0] = hex"00";
+        vm.expectRevert();                                 // updatePriceFeeds{value: 1} with 0 balance
+        b.borrowWithUpdate(address(desk), address(usdc), 1_000e6, upd);
+    }
+
+    /// @notice The liquidation-bot use case end to end: a stale desk book that the keeper cannot
+    ///         liquidate (StaleOracle) becomes liquidatable in the same tx the bot borrows capital.
+    function test_flashWithUpdate_makesStaleBookLiquidatable_inOneTx() public {
+        _admit(agent);
+        _enter(desk, agent);
+        vm.warp(block.timestamp + 10 minutes);            // mark goes stale
+        vm.prank(keeper); vm.expectRevert(AgentDesk.StaleOracle.selector); desk.liquidate(agent);
+        pyth.setNextUpdate(ETH_ID, 2200e8);               // the signed update: -12%, through the floor
+        bytes[] memory upd = new bytes[](1); upd[0] = hex"01";
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6); vm.deal(address(b), 1 ether);
+        b.borrowWithUpdate{value: 1}(address(desk), address(usdc), 100e6, upd);
+        assertTrue(desk.isLiquidatable(agent));           // fresh now, and breached
+        vm.prank(keeper); desk.liquidate(agent);
+    }
+
     /*//////////////////////////// accounting invariant ////////////////////////////*/
 
     /// @dev Desk USDC balance == firmIdle + Σ book.usdc + Σ deposits + firmProfit + Σ earned.
