@@ -303,10 +303,13 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
             DESK.qualifies(me), DESK.earned(me), DESK.AGENT_DEPOSIT(),
         ]);
         const inEth = bk.eth > 0n;
-        const value = Number(formatUnits(bv.value ?? bv[0], 6));
+        const markFresh = Boolean(bv.fresh ?? bv[1]);
+        // A stale mark comes back as (0, false). NEVER turn that into a -100% "loss" — it would trip
+        // the stop-loss and dump a healthy position on a transient oracle gap. Unknown stays unknown.
+        const value = markFresh ? Number(formatUnits(bv.value ?? bv[0], 6)) : null;
         // Entry reference: what we swapped in (persisted); fall back to the allocation if unknown.
         const entry = STATE.deskEntryUsdc ?? (bk.active ? Number(formatUnits(bk.allocation, 6)) : null);
-        const unreal = inEth && entry ? ((value - entry) / entry) * 100 : 0;
+        const unreal = (inEth && entry && value != null) ? ((value - entry) / entry) * 100 : null;
         desk = {
             wired: true,
             admitted: Boolean(bk.active),
@@ -318,13 +321,13 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
                 book_usdc: formatUnits(bk.usdc, 6),
                 book_eth: formatUnits(bk.eth, 18),
                 in_eth: inEth,
-                book_value_usdc: value.toFixed(4),
-                mark_fresh: Boolean(bv.fresh ?? bv[1]),
+                book_value_usdc: value != null ? value.toFixed(4) : null,
+                mark_fresh: markFresh,
                 drawdown_floor_usdc: formatUnits(floor, 6),
                 liquidatable_by_keeper: Boolean(liq),
                 ...(inEth ? {
                     entry_value_usdc: entry != null ? entry.toFixed(4) : null,
-                    unrealized_return: `${unreal >= 0 ? '+' : ''}${unreal.toFixed(3)}%`,
+                    unrealized_return: unreal != null ? `${unreal >= 0 ? '+' : ''}${unreal.toFixed(3)}%` : 'unknown (stale mark)',
                     unrealized_return_value: unreal,
                 } : {}),
             } : {}),
@@ -716,7 +719,8 @@ function evalExitDecision(state) {
 // floor-guard: the keeper's liquidation forfeits the deposit, so we exit before it can fire.
 function deskExitDecision(state) {
     const d = state.desk;
-    const r = d?.unrealized_return_value ?? 0;
+    if (!d?.mark_fresh || d?.unrealized_return_value == null) return null;   // never exit on a stale mark
+    const r = d.unrealized_return_value;
     const peak = STATE.deskPeakR ?? r;
     if (r >= DESK_TP_PCT) return `desk take-profit +${r.toFixed(2)}% >= ${DESK_TP_PCT}%`;
     if (peak >= DESK_TRAIL_ARM_PCT && r > 0 && r <= peak - DESK_TRAIL_GIVEBACK_PCT) {
@@ -1273,8 +1277,12 @@ async function tick(ctx) {
     // --- Desk position (real 1x ETH book): deterministic exit management (no LLM call) ---
     // Same philosophy as the eval exit manager: code owns exits. The stop sits well inside the
     // desk's drawdown floor so a keeper never liquidates us (that forfeits the deposit).
-    if (state.desk?.admitted && state.desk?.in_eth) {
-        const r = state.desk.unrealized_return_value ?? 0;
+    if (state.desk?.admitted && state.desk?.in_eth && (!state.desk.mark_fresh || state.desk.unrealized_return_value == null)) {
+        // Can't value the book right now — hold. A stale Pyth mark must never read as a loss.
+        log('WARN', 'desk-hold-stale-mark', { book_eth: state.desk.book_eth, floor: state.desk.drawdown_floor_usdc });
+        if (!(state.eval?.active && state.eval?.in_virtual_trade)) return;
+    } else if (state.desk?.admitted && state.desk?.in_eth) {
+        const r = state.desk.unrealized_return_value;
         STATE.deskPeakR = STATE.deskPeakR === null ? r : Math.max(STATE.deskPeakR, r);
         saveDeskState();
         const reason = deskExitDecision(state);
