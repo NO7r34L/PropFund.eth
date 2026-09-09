@@ -65,7 +65,10 @@ real capital behind a *sustained record* — never behind a single lucky pass.
    bounded by the bracket and a hard drawdown floor.
    **Idle capital works too**: the firm's unallocated USDC is an ERC-3156 flash lender (0.05%
    fee → firm profit). A flash loan leaves and returns inside one transaction or reverts, so the
-   capital is never exposed to price, credit or time — it's still parked in USDC.
+   capital is never exposed to price, credit or time — it's still parked in USDC. And it's the
+   only lender offering **oracle-fresh loans**: `flashLoanWithUpdate` pushes a signed Pyth
+   update before lending, so a liquidation bot gets a fresh price on every Pyth-reading protocol
+   *and* the capital to act on it in one atomic call.
 5. **Scale, then cash out** — On the desk, realized profit above your allocation splits
    agent/firm and is swept. Your **allocation grows with your track record** (1× → 2× → 4× → 8×)
    — but only for realized profit that beats simply holding ETH since you were admitted, and only
@@ -161,7 +164,7 @@ The controller's USDC balance never moves; all flows route to the principal.
 | `src/EvalCert.sol` | ERC-721 cert NFT (mint-only by PropFund). Hot-swappable renderer pointer |
 | `src/EvalCertRenderer.sol` | On-chain SVG renderer. Procedural per-trader candlestick chart |
 | `src/PropFundRouter.sol` | **Optional** atomic-update periphery. Folds the Pyth update into the trade (one tx) via the delegation system. Stateless, custody-free; the immutable core is untouched. See [DESIGN.md](./DESIGN.md#atomic-update-router-periphery) |
-| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool, every entry a bounded on-chain bracket order with a 24 h max hold that anyone can execute. Idle firm capital is an ERC-3156 flash lender (fee → firm profit). Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold, gated on the agent's profit factor (win ratio weighted by size) per tier, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
+| `src/AgentDesk.sol` | **Optional** real prop desk. The firm funds it with its own USDC — no stakers, nothing sold. An agent whose PropFund probation record clears the bar (read from the lens) admits itself and gets a book to time ETH spot: 1×, long-only, all-in/all-out through one deep pool, every entry a bounded on-chain bracket order with a 24 h max hold that anyone can execute. Idle firm capital is an ERC-3156 flash lender (fee → firm profit) with oracle-fresh loans (Pyth update + capital in one call). Profit above allocation splits agent/firm; the allocation scales 1×→8× on realized alpha over buy-and-hold, gated on the agent's profit factor (win ratio weighted by size) per tier, always collateralized by the agent's deposit + reinvested winnings; a drawdown breach closes the book and forfeits the deposit; anyone can liquidate a breached open book. PropFund is read-only from here |
 | `analysis/desk_sim.py` | 1000-agent, four-regime simulation of the desk's exact mechanics (flat vs ladder, exit-manager shapes). The numbers behind the deployed defaults |
 | **Pricing** | Pyth Network. Pull-based — `pushPyth(updateData)` lands a signed VAA on-chain (or the router applies it atomically with the trade). Every feed locked at expo=−8. Conf-interval filter rejects wide spreads |
 | **Settlement** | Pure oracle. No swaps, DEX, slippage, or fill MEV |

@@ -145,6 +145,8 @@ REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
   pause blocks admit/enter/flash only — exit, liquidate, resign, claim always work
 FLASH LENDING (ERC-3156): flashLoan(receiver, USDC, amount ≤ firmIdle) — out and back in one tx or revert;
   fee FLASH_FEE_BPS → firmProfit; desk locked during the callback; only a receiver can borrow for itself
+  flashLoanWithUpdate(receiver, USDC, amount, pythUpdate[], data) payable — push the signed Pyth update
+  (borrower pays the oracle fee, excess refunded) THEN lend: fresh price + capital, one atomic call
 ```
 
 ## Graduation and the real desk (AgentDesk)
@@ -253,6 +255,14 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   Honest expectation: revenue is demand-driven; arbitrageurs route through Aave, Balancer and
   Uniswap, so an unlisted lender earns little until it's integrated into a flash-loan router. The
   mechanism costs nothing to carry and cannot lose the capital.
+- **Oracle-fresh loans — the small lender's edge.** A small desk can't beat Balancer's 0% or
+  Aave's depth. What it can offer that no large lender does: `flashLoanWithUpdate` applies a
+  signed Pyth update *before* the loan. Pyth is one shared contract per chain, so the fresh price
+  is live for every protocol that reads it — including PropFund and this desk — the instant the
+  borrower's callback runs. A liquidation bot's whole problem is "fresh price and capital in the
+  same block"; this is that, in one call, for the Pyth update fee plus 0.05%. The desk holds no
+  ETH between transactions: the borrower's fee overpayment is refunded as the last action, after
+  the loan is already repaid.
 - **The agent exits itself first.** With the bracket on-chain, its code has three jobs: execute
   its own bracket the moment it hits (don't wait for a keeper), trail the stop upward via
   `updateBracket` as the trade works, and floor-guard — exit before a keeper *liquidation* (the

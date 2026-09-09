@@ -49,6 +49,10 @@ import {SafeTransferLib} from "./lib/SafeTransferLib.sol";
 ///         A flash loan leaves and returns within one transaction or the whole thing reverts, so
 ///         the USDC is never exposed to price, credit or duration — it is still "parked in USDC"
 ///         — and every loan pays FLASH_FEE_BPS into firmProfit, offsetting the desk's fees.
+///         ORACLE-FRESH LOANS: flashLoanWithUpdate pushes a signed Pyth update (borrower pays the
+///         oracle fee) before lending. Pyth is one shared contract, so the fresh price is live for
+///         whatever the borrower is about to liquidate — capital and price in one atomic call,
+///         which is exactly what a liquidation bot needs and no large lender offers.
 ///         The firm's economics are the firm's own risk-managed bet — exactly what founding a
 ///         prop firm is — not a promise to third parties.
 /// @dev PropFund is read-only from here. Cancun transient storage for reentrancy.
@@ -89,6 +93,8 @@ contract AgentDesk is IERC3156FlashLender {
     /// @notice Stricter than EIP-3156: only a receiver may initiate its own loan (no third party can
     ///         push a loan — and a fee — onto a contract that happens to hold an approval).
     error FlashInitiatorNotReceiver();
+    /// @notice Refund of unused msg.value (Pyth fee overpayment) to the borrower failed.
+    error RefundFailed();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -112,6 +118,7 @@ contract AgentDesk is IERC3156FlashLender {
     event Resigned(address indexed agent);
     event Claimed(address indexed agent, uint256 amount);
     event FlashLoaned(address indexed receiver, address indexed initiator, uint256 amount, uint256 fee);
+    event FlashLoanedWithUpdate(address indexed receiver, uint256 amount, uint256 fee, uint256 oracleFee, uint256 feeds);
 
     /*//////////////////////////////////////////////////////////////
                               CONFIG (IMMUTABLE)
@@ -558,11 +565,48 @@ contract AgentDesk is IERC3156FlashLender {
         nonReentrant
         returns (bool)
     {
+        _flash(receiver, token, amount, data);
+        return true;
+    }
+
+    /// @notice An ORACLE-FRESH flash loan: apply a signed Pyth update first (msg.value ≥ the quoted
+    ///         update fee; excess refunded), then lend. One atomic call gives a liquidation bot a
+    ///         fresh price on every protocol that reads this Pyth contract AND the capital to act
+    ///         on it. Same terms and guarantees as flashLoan.
+    function flashLoanWithUpdate(
+        IERC3156FlashBorrower receiver,
+        address token,
+        uint256 amount,
+        bytes[] calldata priceUpdate,
+        bytes calldata data
+    ) external payable nonReentrant returns (bool) {
+        uint256 oracleFee;
+        if (priceUpdate.length != 0) {
+            oracleFee = PYTH.getUpdateFee(priceUpdate);
+            PYTH.updatePriceFeeds{value: oracleFee}(priceUpdate);
+        }
+        uint256 fee = _flash(receiver, token, amount, data);
+        emit FlashLoanedWithUpdate(address(receiver), amount, fee, oracleFee, priceUpdate.length);
+        // Refund the borrower's overpayment of the oracle fee — last action, loan already repaid.
+        uint256 bal = address(this).balance;
+        if (bal != 0) {
+            // slither-disable-next-line arbitrary-send-eth
+            (bool ok, ) = msg.sender.call{value: bal}("");
+            if (!ok) revert RefundFailed();
+        }
+        return true;
+    }
+
+    /// @dev The loan itself. Caller must hold the reentrancy lock.
+    function _flash(IERC3156FlashBorrower receiver, address token, uint256 amount, bytes calldata data)
+        internal
+        returns (uint256 fee)
+    {
         if (paused) revert Paused();
         if (msg.sender != address(receiver)) revert FlashInitiatorNotReceiver();
         if (token != address(USDC)) revert UnsupportedToken();
         if (amount == 0 || amount > firmIdle) revert InsufficientIdle();
-        uint256 fee = amount * FLASH_FEE_BPS / 10_000;
+        fee = amount * FLASH_FEE_BPS / 10_000;
 
         USDC.safeTransfer(msg.sender, amount);
         if (receiver.onFlashLoan(msg.sender, token, amount, fee, data) != FLASH_CALLBACK_SUCCESS) revert FlashCallbackFailed();
@@ -570,7 +614,6 @@ contract AgentDesk is IERC3156FlashLender {
 
         firmProfit += fee;
         emit FlashLoaned(address(receiver), msg.sender, amount, fee);
-        return true;
     }
 
     /*//////////////////////////////////////////////////////////////
