@@ -14,6 +14,15 @@ contract MockLens is IPropFundLens {
         s.cumulativePnl = cumulativePnl;
         s.wins = wins;
         s.losses = losses;
+        // default: winners twice the size of losers (profit factor 2.0)
+        if (cumulativePnl > 0) { s.totalProfit = uint256(cumulativePnl) * 2; s.totalLoss = uint256(cumulativePnl); }
+        else { s.totalProfit = 0; s.totalLoss = uint256(-cumulativePnl); }
+    }
+
+    /// @notice Set the gross profit / gross loss the desk's profit-factor bar reads.
+    function setGross(address trader, uint256 totalProfit, uint256 totalLoss) external {
+        _stats[trader].totalProfit = totalProfit;
+        _stats[trader].totalLoss = totalLoss;
     }
 
     function getTraderStats(address trader) external view returns (TraderStats memory) {

@@ -70,13 +70,18 @@ const EVAL_DRAWDOWN_FAIL_BPS = 500;
 // --- Desk (real 1x ETH spot book) exit policy. Same shape as the eval exit manager: the code
 // owns the exit, the LLM owns the entry. The stop MUST sit well inside the desk's drawdown floor
 // (MAX_DRAWDOWN_BPS below allocation, 10% by default) — a keeper liquidation there FORFEITS the
-// agent's deposit, so we always exit ourselves first. Round-trip venue cost is ~0.17%, so TP and
-// trail are set wide enough to mean something net of friction.
-const DESK_TP_PCT = Number(process.env.DESK_TP_PCT || 2.0);
-const DESK_TRAIL_ARM_PCT = Number(process.env.DESK_TRAIL_ARM_PCT || 1.0);
-const DESK_TRAIL_GIVEBACK_PCT = Number(process.env.DESK_TRAIL_GIVEBACK_PCT || 0.5);
-const DESK_SL_PCT = Number(process.env.DESK_SL_PCT || 3.0);
-const DESK_SLIPPAGE_BPS = Number(process.env.DESK_SLIPPAGE_BPS || 100);   // minOut tolerance vs live spot                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
+// agent's deposit, so we always exit ourselves first.
+// The shape is ASYMMETRIC on purpose: risk 1.5 to make 6, trail wide, hold up to a week. The old
+// SL 3 / TP 2 needed ~64% accuracy just to cover friction and left even skilled agents net
+// negative in analysis/desk_sim.py (1000 agents, four regimes); this shape was the best of the
+// sweep in every regime. Round-trip venue cost is ~0.17%.
+const DESK_TP_PCT = Number(process.env.DESK_TP_PCT || 6.0);
+const DESK_TRAIL_ARM_PCT = Number(process.env.DESK_TRAIL_ARM_PCT || 3.0);
+const DESK_TRAIL_GIVEBACK_PCT = Number(process.env.DESK_TRAIL_GIVEBACK_PCT || 1.5);
+const DESK_SL_PCT = Number(process.env.DESK_SL_PCT || 1.5);
+const DESK_MAX_HOLD_HOURS = Number(process.env.DESK_MAX_HOLD_HOURS || 168);   // time-stop: a week with no result frees the book
+const DESK_SLIPPAGE_BPS = Number(process.env.DESK_SLIPPAGE_BPS || 100);   // minOut tolerance vs live spot
+const DESK_CLAIM_MIN_USDC = Number(process.env.DESK_CLAIM_MIN_USDC || 25); // auto-claim threshold once the ladder is capped                                           // mirrors contract EVAL_DRAWDOWN_BPS (5%)
 const FAST_CADENCE_SEC = Number(process.env.AGENT_FAST_CADENCE_SEC || 60);    // poll faster while a position is open
 
 // --- ICT-style entry gating: spend an LLM call only when the market is actually in play ---
@@ -163,16 +168,18 @@ ACTIONS REFERENCE (the FULL set — but only a subset is legal each tick. Each u
 - {"action": "WITHDRAW_PROFIT", "args": {"amount_usdc": "<decimal>"}}
 - {"action": "RESIGN"} — exit funded status
 - {"action": "DESK_ADMIT"} — GRADUATE. Offered only when state.desk.qualifies=true (your PropFund probation record clears the desk bar). Posts the deposit and admits you to the REAL desk.
-- {"action": "ENTER_ETH"} — desk only: swap your WHOLE USDC book into ETH (real 1x spot, one pool). Exits are AUTOMATED in code (take-profit / trailing / stop / floor-guard). Round-trip venue cost is ~0.17%, so enter only on a setup worth clearly more than that. Do NOT churn.
+- {"action": "ENTER_ETH"} — desk only: swap your WHOLE USDC book into ETH (real 1x spot, one pool). Exits are AUTOMATED in code (stop 1.5% / take-profit 6% / trailing / week time-stop / floor-guard) — the shape rewards catching a real move, so enter only on a setup you expect to run several percent. Round-trip venue cost is ~0.17%. Do NOT churn.
 - {"action": "EXIT_ETH"} — desk only: swap the whole ETH book back to USDC now. The automated exit normally handles this; use only with a strong reason.
-- {"action": "DESK_CLAIM"} — pull your earned profit share from the desk.
 
 DESK PHASE (state.desk.admitted=true): you have GRADUATED from virtual probation to a real book of the
 firm's capital. PropFund probation entries are over. Your only job is timing ONE asset (ETH) with the
 whole book — you are either in USDC or in ETH. The book has a hard drawdown floor
 (state.desk.drawdown_floor_usdc): if its marked value reaches it, a keeper liquidates you and your
 deposit is FORFEITED. The code's automated stop is set well inside that floor — let it work; never
-hold through a loss hoping.
+hold through a loss hoping. Your ALLOCATION SCALES (1x → 2x → 4x → 8x) with REALIZED profit — but only
+when that profit beats what simply holding ETH since your admission would have made
+(state.desk.hold_hurdle_usdc). Beta is not paid; timing is. Your earned share is held as collateral for
+the bigger book and released automatically (claims are handled by the code, not you).
 
 OPTIONAL — SELF-SCHEDULING (you are NOT polled on a fixed timer; you set your own wake conditions):
 Add a "watch" object to your response to say WHEN you want to be consulted next. Between wakes a
@@ -298,17 +305,20 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
     // graduation (desk) in one state object. Only when a desk is wired.
     let desk = null;
     if (DESK) {
-        const [bk, bv, floor, liq, qual, earnedRaw, dep] = await Promise.all([
-            DESK.books(me), DESK.bookValue(me), DESK.drawdownFloor(me), DESK.isLiquidatable(me),
-            DESK.qualifies(me), DESK.earned(me), DESK.AGENT_DEPOSIT(),
+        const [bk, bv, floor, liq, qual, earnedRaw, dep, lad, baseAlloc, maxMult] = await Promise.all([
+            DESK.getBook(me), DESK.bookValue(me), DESK.drawdownFloor(me), DESK.isLiquidatable(me),
+            DESK.qualifies(me), DESK.earned(me), DESK.AGENT_DEPOSIT(), DESK.ladder(me),
+            DESK.BASE_ALLOCATION(), DESK.MAX_ALLOCATION_MULT(),
         ]);
         const inEth = bk.eth > 0n;
         const markFresh = Boolean(bv.fresh ?? bv[1]);
         // A stale mark comes back as (0, false). NEVER turn that into a -100% "loss" — it would trip
         // the stop-loss and dump a healthy position on a transient oracle gap. Unknown stays unknown.
         const value = markFresh ? Number(formatUnits(bv.value ?? bv[0], 6)) : null;
-        // Entry reference: what we swapped in (persisted); fall back to the allocation if unknown.
-        const entry = STATE.deskEntryUsdc ?? (bk.active ? Number(formatUnits(bk.allocation, 6)) : null);
+        // Entry reference: the contract records the exact USDC that went into the open position.
+        const entry = inEth ? Number(formatUnits(bk.entryUsdc, 6)) : (STATE.deskEntryUsdc ?? null);
+        const maxAlloc = baseAlloc * maxMult;
+        const heldHours = inEth && bk.entryTime > 0n ? (Date.now() / 1000 - Number(bk.entryTime)) / 3600 : null;
         const unreal = (inEth && entry && value != null) ? ((value - entry) / entry) * 100 : null;
         desk = {
             wired: true,
@@ -318,6 +328,13 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
             earned_usdc: formatUnits(earnedRaw, 6),
             ...(bk.active ? {
                 allocation_usdc: formatUnits(bk.allocation, 6),
+                max_allocation_usdc: formatUnits(maxAlloc, 6),
+                at_max_allocation: bk.allocation >= maxAlloc,
+                realized_pnl_usdc: formatUnits(bk.cumPnl, 6),
+                desk_trades: Number(bk.trades),
+                // Allocation ladder: the book grows only on realized alpha over holding ETH since admission.
+                ladder_mult_now: Number(lad.mult ?? lad[0]),
+                hold_hurdle_usdc: formatUnits(lad.hurdle ?? lad[1], 6),
                 book_usdc: formatUnits(bk.usdc, 6),
                 book_eth: formatUnits(bk.eth, 18),
                 in_eth: inEth,
@@ -327,6 +344,7 @@ async function readState(propfund, provider, usdc, wallet, network, lens = propf
                 liquidatable_by_keeper: Boolean(liq),
                 ...(inEth ? {
                     entry_value_usdc: entry != null ? entry.toFixed(4) : null,
+                    held_hours: heldHours,
                     unrealized_return: unreal != null ? `${unreal >= 0 ? '+' : ''}${unreal.toFixed(3)}%` : 'unknown (stale mark)',
                     unrealized_return_value: unreal,
                 } : {}),
@@ -727,6 +745,9 @@ function deskExitDecision(state) {
         return `desk trailing-stop: peaked +${peak.toFixed(2)}%, now +${r.toFixed(2)}%`;
     }
     if (r <= -DESK_SL_PCT) return `desk stop-loss ${r.toFixed(2)}% <= -${DESK_SL_PCT}%`;
+    if (d.held_hours != null && d.held_hours >= DESK_MAX_HOLD_HOURS) {
+        return `desk time-stop: held ${d.held_hours.toFixed(1)}h >= ${DESK_MAX_HOLD_HOURS}h at ${r >= 0 ? '+' : ''}${r.toFixed(2)}%`;
+    }
     const value = Number(d?.book_value_usdc), floor = Number(d?.drawdown_floor_usdc);
     if (value > 0 && floor > 0 && value <= floor * 1.01) {
         return `desk floor-guard: marked ${value.toFixed(2)} within 1% of liquidation floor ${floor.toFixed(2)}`;
@@ -738,9 +759,7 @@ function computeValidActions(state) {
     // Graduated: admitted to the real desk. Probation entries (PropFund) stop — tick() still
     // closes any open eval trade deterministically, but the LLM's job is now the desk book.
     if (state.desk?.admitted) {
-        const acts = ['WAIT', state.desk.in_eth ? 'EXIT_ETH' : 'ENTER_ETH'];
-        if (Number(state.desk.earned_usdc) > 0) acts.push('DESK_CLAIM');
-        return acts;
+        return ['WAIT', state.desk.in_eth ? 'EXIT_ETH' : 'ENTER_ETH'];
     }
     const base = _baseValidActions(state);
     if (state.desk?.wired && !state.desk.admitted && state.desk.qualifies) base.push('DESK_ADMIT');
@@ -809,7 +828,7 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     if (state.desk?.admitted) {
         hints.push(state.desk.in_eth
             ? `DESK: IN ETH — book marked ${state.desk.book_value_usdc} USDC (${state.desk.unrealized_return} vs entry), liquidation floor ${state.desk.drawdown_floor_usdc}. Exit is AUTOMATED; WAIT unless you have a strong reason to EXIT_ETH.`
-            : `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc}. ENTER_ETH only on a clean LONG setup worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`);
+            : `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc} (ladder ${state.desk.ladder_mult_now}x, realized ${state.desk.realized_pnl_usdc} vs hold-hurdle ${state.desk.hold_hurdle_usdc}). ENTER_ETH only on a clean LONG setup worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`);
     }
     // Eval entry directive: the code owns exits, so the LLM's only eval job is a clean LONG entry.
     if (state.eval.active && !state.eval.passed && !state.eval.in_virtual_trade) {
@@ -1181,7 +1200,7 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
             case 'ENTER_ETH': {
                 // minOut from live spot (BigInt math — 1e17-scale wei overflows Number precision).
                 // Protects the real fill against a stale pool price or a sandwich. 0 = accept venue price.
-                const bk = await DESK.books(wallet.address);
+                const bk = await DESK.getBook(wallet.address);
                 const spot = await fetchLiveSpot(network, network?.pythPriceIds?.[0]);   // ETH is index 0
                 let minOut = 0n;
                 if (spot && spot > 0) {
@@ -1195,7 +1214,7 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
                 break;
             }
             case 'EXIT_ETH': {
-                const bk = await DESK.books(wallet.address);
+                const bk = await DESK.getBook(wallet.address);
                 const spot = await fetchLiveSpot(network, network?.pythPriceIds?.[0]);
                 let minOut = 0n;
                 if (spot && spot > 0) {
@@ -1274,6 +1293,16 @@ async function tick(ctx) {
         return;   // re-read state next tick with the book in place
     }
 
+    // --- Claims are a mechanic, not a market call ---
+    // Unclaimed winnings are the collateral that lets the book scale; claiming early caps the
+    // ladder at whatever the deposit covers. So the code only claims once the allocation is at its
+    // hard cap (earned can't buy more book) and something meaningful has accrued.
+    if (state.desk?.admitted && state.desk.at_max_allocation && Number(state.desk.earned_usdc) >= DESK_CLAIM_MIN_USDC) {
+        const result = await executeAction({ action: 'DESK_CLAIM', reasoning: 'ladder capped; sweep earned share' },
+            propfund, usdc, wallet, state, ctx.net, ctx.router);
+        log(result.ok ? 'EXEC' : 'ERROR', result.ok ? 'desk-claimed' : 'desk-claim-failed', { earned: state.desk.earned_usdc, ...result });
+    }
+
     // --- Desk position (real 1x ETH book): deterministic exit management (no LLM call) ---
     // Same philosophy as the eval exit manager: code owns exits. The stop sits well inside the
     // desk's drawdown floor so a keeper never liquidates us (that forfeits the deposit).
@@ -1295,6 +1324,7 @@ async function tick(ctx) {
                 unrealized: state.desk.unrealized_return,
                 peak: STATE.deskPeakR != null ? `${STATE.deskPeakR.toFixed(3)}%` : null,
                 book_value: state.desk.book_value_usdc, floor: state.desk.drawdown_floor_usdc,
+                allocation: state.desk.allocation_usdc, ladder: state.desk.ladder_mult_now,
                 keeper_liquidatable: state.desk.liquidatable_by_keeper,
             });
         }

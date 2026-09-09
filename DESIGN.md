@@ -124,13 +124,18 @@ WITHDRAW PROFIT (principal-only) or RESIGN (deposit returned)
   ── everything above is VIRTUAL: it builds a record, it never deploys real capital ──
       ↓
 GRADUATE (AgentDesk.admit — a rule read from the PropFund lens: cumulative PnL ≥ MIN_CUM_PNL,
-  closed trades ≥ MIN_TRADES; or firm preapproval). Posts AGENT_DEPOSIT. No human decides.
+  closed trades ≥ MIN_TRADES, gross wins / gross losses ≥ MIN_PROFIT_FACTOR_BPS; or firm
+  preapproval). Posts AGENT_DEPOSIT; records ETH spot as the buy-and-hold benchmark. No human decides.
       ↓
 REAL DESK (a book of the firm's own USDC, BASE_ALLOCATION)
   enterEth: whole book → WETH through one spot pool   exitEth: whole book → USDC
   1× long-only. No leverage → no liquidation engine, no funding, no margin.
   profit above allocation: split AGENT_SPLIT_BPS / firm, swept (allocation IS the high-water)
   loss: shrinks the book
+  after every exit — THE LADDER: realized desk PnL ≥ SCALE_T2/T4/T8 of base AND closed desk trades
+    ≥ SCALE_MIN_TRADES × 1/2/3 AND realized PnL ≥ what a base-sized hold of ETH made since admission
+    → allocation 2×/4×/8× (deposit topped up from earned so it always covers allocation × drawdown);
+    falls back down on losses (excess book → firm, excess deposit → earned)
   book ≤ allocation × (1 − MAX_DRAWDOWN_BPS): closed, deposit forfeited; anyone may liquidate an
     open book that has breached (Pyth-marked, fill bounded to 2% of mark)
   pause blocks admit/enter only — exit, liquidate, resign, claim always work
@@ -193,15 +198,33 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
 - **Settlement.** Profit above the allocation splits `AGENT_SPLIT_BPS` / firm and is swept, so
   the book stays at its allocation — **the allocation is the high-water; a recovery from a loss
   earns no split.** Losses shrink the book.
+- **The allocation ladder — capital concentrates in proven edge.** A flat book caps the right
+  tail at one allocation, and the whole prop-firm thesis is riding the winners. After every exit
+  the desk recomputes a target multiplier (1×/2×/4×/8× of `BASE_ALLOCATION`) from realized desk PnL
+  (`SCALE_T2/T4/T8_BPS`), with three gates that each answer a specific failure mode:
+  - **Track record, not a lucky trade** — each tier needs `SCALE_MIN_TRADES` × 1/2/3 closed desk
+    trades. A single ±5% ETH move clears any dollar threshold; 40 trades don't.
+  - **Alpha, not beta** — realized PnL must be ≥ what a *base-sized buy-and-hold of ETH* made since
+    admission (zero when ETH is down, so staying flat through a drawdown counts). Long-only
+    timing in a bull market is otherwise paid for beta the firm could have bought.
+  - **Collateralized at every tier** — the deposit must always cover `allocation × MAX_DRAWDOWN`.
+    A scale-up draws the shortfall from the agent's unclaimed winnings; if those can't cover it,
+    the scale-up is capped there. A blow-up at 8× makes the firm whole exactly like one at 1×.
+  Scale-downs return the excess book to the firm and release excess deposit to `earned`. The
+  reference agent therefore never claims while the ladder can still grow (claims are a mechanic
+  the code owns; it sweeps only once the allocation is at its hard cap).
 - **Drawdown floor.** At or below `allocation × (1 − MAX_DRAWDOWN_BPS)` the book closes and the
   deposit is forfeited. Anyone can `liquidate` an open book that has breached — marked at Pyth
   with PropFund's freshness + confidence guards, fill bounded to within 2% of the mark so a
   liquidator can't force a bad price.
 - **Pause never traps an agent.** It blocks admissions and new entries only; exit, liquidate,
   resign, and claim always work.
-- **The agent exits itself first.** Its code-owned exit manager (take-profit / trailing / stop /
-  floor-guard) sits well inside the keeper's floor, because a keeper liquidation forfeits the
-  deposit. A stale oracle mark is treated as *unknown*, never as a loss.
+- **The agent exits itself first.** Its code-owned exit manager sits well inside the keeper's
+  floor, because a keeper liquidation forfeits the deposit. A stale oracle mark is treated as
+  *unknown*, never as a loss. **Its shape is asymmetric on purpose:** stop 1.5%, target 6%, trail
+  arms at 3% and gives back 1.5%, time-stop after a week (`DESK_*` env). Risk 1.5 to make 6 needs
+  a ~25% hit rate to cover friction; the earlier 3%-stop / 2%-target shape needed ~64% and left even
+  skilled agents net negative in simulation.
 
 ### The risk stack, in the order it absorbs loss
 
@@ -218,10 +241,14 @@ promises, expressed as structure.
 
 - The venue on the devnet is `MockSwap` (fills at Pyth spot with a 0.1% haircut). A real
   Aerodrome/Uniswap adapter is required before any real network. Real fills mean real slippage.
-- The admission bar is raw cumulative PnL and trade count. Long-only, that is trivially cleared
-  in a bull market — it wants a drawdown-weighted, two-regime criterion.
-- The keeper sweeps PropFund's paths; it does not yet sweep desk liquidations (anyone can call
-  `liquidate`, but nothing does so automatically).
+- The admission bar is cumulative PnL, trade count and a gross profit factor — still a
+  probation record made in one regime. The ladder's buy-and-hold hurdle is what makes the *desk*
+  regime-aware; the screen itself is not yet.
+- `analysis/desk_sim.py` is a model with a GBM price process. It says the deployed choices rank
+  best across four regimes; it does not say what the firm will earn. Two of its numbers deserve
+  suspicion: noise agents come out slightly positive under the asymmetric exit (positive skew of
+  the price process), and 70–85% of *skilled* agents are still revoked within two years — the 10%
+  floor is seven consecutive stops away. Position sizing below all-in is the obvious next lever.
 - The desk's economics are the *firm's* bet, unproven. Running it with a modest amount of the
   firm's own capital is the honest experiment that tells you whether screened agents have edge
   after real frictions — before any third party is involved.

@@ -8,7 +8,13 @@ pragma solidity 0.8.26;
 //                VENUE  (deploys + funds a MockSwap at Pyth spot if unset — devnet/fork only)
 //                FUND_USDC (6dp, default 5_000e6) — the firm's initial capital
 //                BASE_ALLOCATION (default 500e6), AGENT_DEPOSIT (50e6), MAX_DD_BPS (1000),
-//                AGENT_SPLIT_BPS (5000), MIN_CUM_PNL (10e6), MIN_TRADES (5), STALE_AFTER (300)
+//                AGENT_SPLIT_BPS (4000), MIN_CUM_PNL (10e6), MIN_TRADES (5),
+//                MIN_PROFIT_FACTOR_BPS (12000 = gross wins >= 1.2x gross losses), STALE_AFTER (300)
+//                Allocation ladder (bps of BASE_ALLOCATION of realized desk PnL):
+//                SCALE_T2_BPS (2000 = $100 -> 2x), SCALE_T4_BPS (5000 = $250 -> 4x),
+//                SCALE_T8_BPS (12000 = $600 -> 8x), SCALE_MIN_TRADES (40 closed desk trades for 2x,
+//                80 for 4x, 120 for 8x), MAX_ALLOCATION_MULT (8), ALPHA_MARGIN_BPS (0; margin over
+//                buy-and-hold to scale). Defaults are the ones analysis/desk_sim.py validated.
 //
 // Run (devnet):
 //   PRIVATE_KEY=0x... PROPFUND_LENS=0x... USDC=0x... PYTH=0xA2aa50... \
@@ -65,10 +71,17 @@ contract DeployDeskScript is Script {
             baseAllocation: vm.envOr("BASE_ALLOCATION", uint256(500e6)),
             agentDeposit:   vm.envOr("AGENT_DEPOSIT", uint256(50e6)),
             maxDrawdownBps: vm.envOr("MAX_DD_BPS", uint256(1000)),
-            agentSplitBps:  vm.envOr("AGENT_SPLIT_BPS", uint256(5000)),
+            agentSplitBps:  vm.envOr("AGENT_SPLIT_BPS", uint256(4000)),
             minCumPnl:      int256(vm.envOr("MIN_CUM_PNL", uint256(10e6))),
             minTrades:      vm.envOr("MIN_TRADES", uint256(5)),
-            staleAfter:     vm.envOr("STALE_AFTER", uint256(300))
+            minProfitFactorBps: vm.envOr("MIN_PROFIT_FACTOR_BPS", uint256(12_000)),
+            staleAfter:     vm.envOr("STALE_AFTER", uint256(300)),
+            scaleT2Bps:     vm.envOr("SCALE_T2_BPS", uint256(2000)),
+            scaleT4Bps:     vm.envOr("SCALE_T4_BPS", uint256(5000)),
+            scaleT8Bps:     vm.envOr("SCALE_T8_BPS", uint256(12_000)),
+            maxAllocationMult: vm.envOr("MAX_ALLOCATION_MULT", uint256(8)),
+            scaleMinTrades: vm.envOr("SCALE_MIN_TRADES", uint256(40)),
+            alphaMarginBps: vm.envOr("ALPHA_MARGIN_BPS", uint256(0))
         }));
 
         // the firm funds its own desk
