@@ -261,8 +261,9 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   is live for every protocol that reads it — including PropFund and this desk — the instant the
   borrower's callback runs. A liquidation bot's whole problem is "fresh price and capital in the
   same block"; this is that, in one call, for the Pyth update fee plus 0.05%. The desk holds no
-  ETH between transactions: the borrower's fee overpayment is refunded as the last action, after
-  the loan is already repaid.
+  ETH between transactions: the borrower's fee overpayment — exactly `msg.value - oracleFee`, never
+  the contract's balance — is refunded as the last action, after the loan is already repaid, so
+  stray ETH the desk might otherwise hold can never be swept by a borrower.
 - **The agent exits itself first.** With the bracket on-chain, its code has three jobs: execute
   its own bracket the moment it hits (don't wait for a keeper), trail the stop upward via
   `updateBracket` as the trade works, and floor-guard — exit before a keeper *liquidation* (the

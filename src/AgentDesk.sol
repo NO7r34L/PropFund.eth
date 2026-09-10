@@ -95,6 +95,8 @@ contract AgentDesk is IERC3156FlashLender {
     error FlashInitiatorNotReceiver();
     /// @notice Refund of unused msg.value (Pyth fee overpayment) to the borrower failed.
     error RefundFailed();
+    /// @notice msg.value did not cover the quoted Pyth update fee.
+    error InsufficientOracleFee();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -585,13 +587,16 @@ contract AgentDesk is IERC3156FlashLender {
             oracleFee = PYTH.getUpdateFee(priceUpdate);
             PYTH.updatePriceFeeds{value: oracleFee}(priceUpdate);
         }
+        if (msg.value < oracleFee) revert InsufficientOracleFee();
         uint256 fee = _flash(receiver, token, amount, data);
         emit FlashLoanedWithUpdate(address(receiver), amount, fee, oracleFee, priceUpdate.length);
-        // Refund the borrower's overpayment of the oracle fee — last action, loan already repaid.
-        uint256 bal = address(this).balance;
-        if (bal != 0) {
+        // Refund exactly THIS caller's overpayment (msg.value - oracleFee), never the contract's
+        // balance — any ETH the desk otherwise holds is not this borrower's and must not be swept.
+        // Last action, loan already repaid; the nonReentrant lock is still held.
+        uint256 refund = msg.value - oracleFee;
+        if (refund != 0) {
             // slither-disable-next-line arbitrary-send-eth
-            (bool ok, ) = msg.sender.call{value: bal}("");
+            (bool ok, ) = msg.sender.call{value: refund}("");
             if (!ok) revert RefundFailed();
         }
         return true;

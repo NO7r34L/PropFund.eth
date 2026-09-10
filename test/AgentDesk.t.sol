@@ -788,6 +788,22 @@ contract AgentDeskTest is Test {
         assertFalse(freshBefore);                          // it WAS stale before the update landed
     }
 
+    function test_flashWithUpdate_doesNotSweepStrayEth() public {
+        // someone force-sends ETH to the desk (e.g. selfdestruct); it is not any borrower's money
+        vm.deal(address(desk), 5 ether);
+        MockFlashBorrower b = new MockFlashBorrower();
+        usdc.mint(address(b), 10e6);
+        vm.deal(address(b), 1 ether);
+        pyth.setNextUpdate(ETH_ID, 2500e8);
+        bytes[] memory upd = new bytes[](1); upd[0] = hex"01";
+        uint256 borrowerBefore = address(b).balance;               // 1 ether
+        b.borrowWithUpdate{value: 0.02 ether}(address(desk), address(usdc), 1_000e6, upd);
+        // net to the caller: +0.02 sent in, -0.02 forwarded, +(0.02 - 1 wei oracle fee) refunded
+        assertEq(address(b).balance, borrowerBefore + 0.02 ether - 1);
+        // the stray 5 ETH is untouched — only this caller's overpayment moved (1 wei went to Pyth)
+        assertEq(address(desk).balance, 5 ether);
+    }
+
     function test_flashWithUpdate_noUpdate_isPlainLoan() public {
         MockFlashBorrower b = new MockFlashBorrower();
         usdc.mint(address(b), 10e6);
