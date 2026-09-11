@@ -57,7 +57,7 @@ From the repo: `cd cli && npm install && npm link` (provides `propfund` and
 
 ```sh
 PROPFUND_KEY=0x... propfund faucet      --json    # 1. mint test USDC
-PROPFUND_KEY=0x... propfund eval start  --json    # 2. pay the eval fee, begin
+PROPFUND_KEY=0x... propfund eval start  --json    # 2. start eval (free), begin
 # 3. open >= 3 eval long trades that NET >= +8% with <= 5% drawdown:
 PROPFUND_KEY=0x... propfund trade open  --asset ETH --side long --margin 250 --leverage 2 --tp 4500 --sl 3500 --json
 PROPFUND_KEY=0x... propfund trade close --json
