@@ -49,7 +49,7 @@ A single immutable trading contract that runs an oracle-settled prop firm. Users
 ### Eval lifecycle
 
 ```
-   ┌──────────┐  startEval() $10  ┌──────────┐
+   ┌──────────┐  startEval() free  ┌──────────┐
    │ inactive │ ─────────────────▶│  active  │ ◀───┐
    └──────────┘                   └──────────┘     │
         ▲                              │           │

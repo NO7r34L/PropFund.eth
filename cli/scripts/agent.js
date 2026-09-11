@@ -159,7 +159,7 @@ You MUST respond with a single JSON object and nothing else. The shape:
 
 ACTIONS REFERENCE (the FULL set — but only a subset is legal each tick. Each user message lists "VALID ACTIONS RIGHT NOW" — pick from THAT list, not this reference. Picking outside the valid list is rejected before the contract sees it):
 - {"action": "WAIT"} — do nothing this cycle
-- {"action": "START_EVAL"} — pay $1 fee, begin eval (only if not in eval and not funded). Asset is picked per-trade, not at start.
+- {"action": "START_EVAL"} — begin eval, FREE (a negligible 1-wei fee; only if not in eval and not funded). Asset is picked per-trade, not at start.
 - {"action": "OPEN_EVAL_TRADE", "args": {"asset": "ETH|BTC|SOL|AVAX|LINK|AAVE|DOGE|ARB"}} — open a virtual long on the chosen asset. Asset is locked for THIS trade only; next trade you can pick a different one. Look at ALL-ASSET SIGNALS and pick whichever has the cleanest UP setup. Defaults to ETH if omitted.
 - {"action": "CLOSE_EVAL_TRADE"} — close the virtual long (during eval, with an open virtual position). The state will tell you if it's closeable: look at \`eval.current_trade_can_close\` — if true, the 10-block hold is satisfied and you may close anytime. Don't second-guess by counting blocks yourself; trust the field.
 - {"action": "CANCEL_EVAL"} — abandon eval, lose $1 fee (use sparingly; only if eval is unrecoverable)
@@ -1107,7 +1107,7 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
     // Pre-flight: USDC allowance to PropFund (eval/claim/lp need this)
     if (['START_EVAL', 'CLAIM_FUNDING'].includes(action.action)) {
         const allowance = await usdc.allowance(wallet.address, propfund.target);
-        const needed = action.action === 'START_EVAL' ? 10_000_000n : 100_000_000n;
+        const needed = action.action === 'START_EVAL' ? 1n : 100_000_000n;   // eval fee is 1 wei (effectively free); funded deposit is $100
         if (allowance < needed) {
             const tx = await usdc.approve(propfund.target, (1n << 256n) - 1n);
             await tx.wait();
