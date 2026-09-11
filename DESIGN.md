@@ -89,7 +89,7 @@ or skill — and that line is drawn deliberately, not by omission.** And the sec
 ## Lifecycle
 
 ```
-PAY $10 EVAL FEE
+START EVAL (free — 1-wei fee)
       ↓
 VIRTUAL TRADING (3+ trades, ≥10 blocks each, Pyth prices, 30-day window)
   Pick any of 8 listed assets per trade — long-only.
@@ -168,7 +168,7 @@ desk.
 
 ```mermaid
 flowchart LR
-    E["1. Eval<br/>virtual · $1 fee"] --> P["2. Probation<br/>PropFund's virtual funded leg<br/>builds an on-chain record"]
+    E["1. Eval<br/>virtual · free"] --> P["2. Probation<br/>PropFund's virtual funded leg<br/>builds an on-chain record"]
     P -->|record clears the bar| G["3. Graduate<br/>admit() — a rule read from the lens"]
     G --> D["4. Real desk<br/>firm's own USDC · 1× ETH spot<br/>all-in / all-out"]
     D -->|profit above allocation| S["split agent / firm, swept"]

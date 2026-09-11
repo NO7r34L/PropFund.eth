@@ -2,13 +2,13 @@
 
 # PropFund
 
-> **Status:** Deployed and [source-verified](https://sourcify.dev/#/lookup/0x728d1739E494b7957B7b6A3Ba375006f58D296fc) on Ethereum Sepolia — **[contract on Etherscan](https://sepolia.etherscan.io/address/0x728d1739E494b7957B7b6A3Ba375006f58D296fc)** (separate treasury/guardian keys, $1 eval) — and **migrating to Base Sepolia** ([PR #30](https://github.com/NO7r34L/PropFund.eth/pull/30)): the contract's block-based timing constants were sized for Base's 2s blocks, and an oracle update there costs ~600× less gas. The Sepolia bot is paused for the move. Testnet only, no real funds, while we harden it toward an audit.
+> **Status:** Deployed and [source-verified](https://sourcify.dev/#/lookup/0x728d1739E494b7957B7b6A3Ba375006f58D296fc) on Ethereum Sepolia — **[contract on Etherscan](https://sepolia.etherscan.io/address/0x728d1739E494b7957B7b6A3Ba375006f58D296fc)** (separate treasury/guardian keys) — and **migrating to Base Sepolia** ([PR #30](https://github.com/NO7r34L/PropFund.eth/pull/30)): the contract's block-based timing constants were sized for Base's 2s blocks, and an oracle update there costs ~600× less gas. The Sepolia bot is paused for the move. Testnet only, no real funds, while we harden it toward an audit.
 
 **A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent (or human) can clone it, pass a transparent evaluation, get funded with the pool's capital, and trade — no application, no backend, no admin, no human in the loop.
 
 ## Why trade it
 
-- **Two layers, and it matters which one you're in.** **PropFund** is the *screen*: a $1 eval and then a **virtual** "funded" leg (probation) that builds an immutable on-chain record — no real capital changes hands there. **AgentDesk** is the *real desk*: once your record clears the bar you admit yourself (a rule, not a human) and trade a real book of the **firm's own** USDC. You only ever put up the eval fee and a small deposit — never your bankroll.
+- **Two layers, and it matters which one you're in.** **PropFund** is the *screen*: a **free** eval and then a **virtual** "funded" leg (probation) that builds an immutable on-chain record — no real capital changes hands there. **AgentDesk** is the *real desk*: once your record clears the bar you admit yourself (a rule, not a human) and trade a real book of the **firm's own** USDC. You only ever put up the eval fee and a small deposit — never your bankroll.
 - **Keep 80% of every win.** The 80% trader / 15% LP / 5% protocol split is fixed in the contract and paid automatically. No payout team, no negotiation, no cut that changes later.
 - **The rules can't change on you.** Eval target, leverage, profit split, risk limits — all immutable on-chain. No firm can move the goalposts mid-trade, tighten the limits after you pass, or withhold a payout. *This is the part a centralized prop firm can't promise.*
 - **Get funded permissionlessly.** No KYC, no application, no waiting on a human. Pass the eval, claim funding, trade. Any wallet — or any autonomous agent — runs the whole loop.
@@ -46,7 +46,7 @@ flowchart TD
 The pipeline is staged the way a real prop firm's is: screen cheaply and virtually, and only put
 real capital behind a *sustained record* — never behind a single lucky pass.
 
-1. **Evaluate** *(PropFund, virtual)* — Pay the $1 eval fee. Open virtual long trades on any of
+1. **Evaluate** *(PropFund, virtual)* — Start an eval — **free** (a negligible 1-wei fee; there is no cost to try). Open virtual long trades on any of
    8 listed assets (ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB), one asset per trade. Net +8%
    across 3+ closed trades, max 5% drawdown, within the 30-day window.
 2. **Probation** *(PropFund's "funded" leg — still virtual)* — Pay the trader deposit and trade

@@ -62,7 +62,7 @@ contract DeployBaseScript is Script {
             pyth: IPyth(PYTH),
             treasury: vm.envOr("TREASURY", deployer),
             guardian: vm.envOr("GUARDIAN", deployer),
-            evalFee: vm.envOr("EVAL_FEE", uint256(1e6)), // $1 default (item 5); override via EVAL_FEE
+            evalFee: vm.envOr("EVAL_FEE", uint256(1)),   // 1 wei USDC = effectively free (constructor forbids 0); override via EVAL_FEE
             fundedAllocation: 1_000e6,
             evalDuration: 1_296_000,      // 30 days at 2s blocks on Base
             traderDeposit: 100e6,
