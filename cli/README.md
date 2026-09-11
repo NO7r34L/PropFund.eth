@@ -29,7 +29,7 @@ script runner.
 | `PROPFUND_KEY`    | —                | every write command   |
 | `PYTH_API_KEY`    | —                | keeper + agent (Hermes requires a key since 2026-08-26; get one at pythdata.app/signup) |
 | `PYTH_HERMES_URL` | `hermes.pyth.network` | optional; `https://pyth.dourolabs.app/hermes` for the upgraded endpoint |
-| `PROPFUND_DESK`   | —                | optional: `AgentDesk` address. When set, the agent reads its desk book each tick, **graduates automatically** (admits itself the moment its PropFund probation record clears the desk bar — a rule, not an LLM call), then trades the real 1× ETH book with `ENTER_ETH`/`EXIT_ETH` |
+| `PROPFUND_DESK`   | —                | optional: `AgentDesk` address. When set, the agent reads its desk book each tick, **graduates automatically** (admits itself the moment its PropFund probation record clears the desk bar — a rule, not an LLM call), then trades the real 1× ETH book. `ENTER_ETH` opens a **bounded on-chain bracket order** (take-profit + stop-loss set at entry, 24 h max hold, anyone can execute it); the allocation scales 1×→8× on the agent's win ratio (profit factor) vs buy-and-hold |
 | `PROPFUND_DEBUG`  | —                | print stack traces on error |
 
 ## Read commands (no key needed)
@@ -51,7 +51,7 @@ propfund candles --asset ETH --tf 1h --limit 100
 propfund faucet                                     # mint test USDC (testnet)
 propfund faucet --amount 50000
 
-propfund eval start                                 # pay eval fee, begin
+propfund eval start                                 # start eval (free)
 propfund eval trade-open --asset SOL                # open virtual long
 propfund eval trade-close                           # settle virtual position
 propfund eval claim                                 # pay deposit after passing
@@ -193,7 +193,7 @@ float drift.
 
 ```sh
 PROPFUND_KEY=0x... propfund faucet      --json     # 1. get test USDC
-PROPFUND_KEY=0x... propfund eval start  --json     # 2. pay eval fee
+PROPFUND_KEY=0x... propfund eval start  --json     # 2. start eval (free)
 # … open ≥ 3 virtual trades that net ≥ +8% with ≤ 5% drawdown
 PROPFUND_KEY=0x... propfund eval claim  --json     # 3. become funded
 PROPFUND_KEY=0x... propfund trade open  --asset ETH --side long \
@@ -237,7 +237,8 @@ Environment variables:
 | `ICT_LEVEL_PROX_PCT` | wake the LLM when price is within this %% of a key level (prior-day / prior-session high-low). Default `0.15` |
 | `AGENT_WATCH_PLAN`  | `1` to let the agent set its OWN wake conditions — it returns a `watch` plan (price levels + next UTC time) and a free watcher only re-consults it when one fires. Supersedes the static ICT gate. Default off |
 | `MAX_WATCH_IDLE_MIN`| safety cap: re-consult the agent after at most this many minutes even if no level/time trigger fires. Default `360` |
-| `DESK_TP_PCT` / `DESK_TRAIL_ARM_PCT` / `DESK_TRAIL_GIVEBACK_PCT` / `DESK_SL_PCT` | desk exit manager (code-owned, like the eval one): take-profit `2.0`, trail arms at `1.0` and closes on a `0.5` giveback, stop `3.0` — all well inside the desk's 10% liquidation floor so a keeper can never liquidate the agent (that forfeits its deposit). A floor-guard also exits within 1% of the floor regardless |
+| `DESK_TP_PCT` / `DESK_SL_PCT` / `DESK_TRAIL_ARM_PCT` / `DESK_TRAIL_GIVEBACK_PCT` | defaults for the **on-chain bracket** the agent sets on `ENTER_ETH` when the LLM doesn't choose its own: target `6.0`%, stop `1.5`% (asymmetric — risk 1.5 to make 6). The take-profit, stop and 24 h max hold are enforced on-chain and executable by anyone; the agent additionally *trails* the on-chain stop (arms at `3.0`%, gives back `1.5`%, tighten-only) and floor-guards (exits within 1% of the 10% liquidation floor, since a keeper liquidation forfeits the deposit) |
+| `DESK_CLAIM_MIN_USDC` | code auto-claims the agent's earned share once the ladder is at its 8× cap and at least this much (`25`) has accrued — before then, unclaimed winnings collateralize the bigger book |
 | `DESK_SLIPPAGE_BPS` | `minOut` tolerance vs live spot for desk swaps, default `100` (1%) — protects the real fill from a stale pool price or a sandwich |
 | `AGENT_MODEL`      | model id matching the backend (required)                     |
 | `AGENT_CADENCE_SEC`| seconds between decisions (default 300)                      |

@@ -43,11 +43,13 @@ No other trusted parties. No proxy. No on-chain governance.
 ## Attack vectors considered
 
 ### 1. Sybil drain on the LP pool
-**Vector:** A coordinated set of wallets pays $10 evals, fails them on purpose, then claims the pool by other means.
+**Vector:** A coordinated set of wallets starts many evals, fails them on purpose, then tries to claim the pool by other means.
 
-**Mitigation:** Failing an eval costs $10 and gives the attacker nothing back. Pool grows on failures, doesn't shrink. To extract anything they'd have to pass eval (+8% on virtual balance), claim funding ($100 deposit at risk), then trade profitably — at which point they're a legitimate trader.
+**Mitigation:** The eval is *virtual* — a failed eval touches no LP capital and returns the attacker nothing. (The eval fee is now negligible — 1 wei — so the fee is no longer the deterrent; the deterrent is that failing gains nothing.) To extract anything they'd have to pass eval (+8% on virtual balance), claim funding ($100 deposit at risk), then trade profitably — at which point they're a legitimate trader. On **AgentDesk**, real capital is only ever exposed behind a $50 deposit that covers the firm's maximum loss on the book.
 
 **Worst case attacker spend → max LP drain:** $0. Asymmetric in the LP's favor.
+
+**Note (free eval):** a free eval lets an attacker open unlimited *virtual* evals; the only cost imposed is keeper gas to settle their virtual trades, and the funding queue's real spam gate is the $100 funded deposit (and the $50 desk deposit), not the eval fee.
 
 ### 2. Oracle manipulation against Pyth
 **Vector:** Attacker tries to push a bad Pyth update, or sandwiches a legitimate update to settle a position favorably.
@@ -145,7 +147,7 @@ Slither flags two warnings in `_closeTrade` related to its self-recursion (when 
 ### 17. Eval expiry griefing
 **Vector:** Anyone can call `expireEval(trader)` after the deadline. A griefer expires every eval the moment its deadline passes.
 
-**Mitigation:** The eval deadline is published at startEval. Traders plan around it. Griefer pays gas; trader can re-eval for $10. Not a meaningful attack.
+**Mitigation:** The eval deadline is published at startEval. Traders plan around it. Griefer pays gas; trader can re-eval for free. Not a meaningful attack.
 
 ### 18. Compromised agent key drains principal via cancel-restart
 **Vector:** Attacker steals an agent EOA, repeatedly calls `cancelEval` + `startEval` to drain the principal's USDC at $10 per cycle.

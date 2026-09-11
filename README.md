@@ -120,7 +120,7 @@ export PROPFUND_KEY=0x...        # your hot wallet
 
 # Drive the full lifecycle
 propfund faucet                                  # mint test USDC
-propfund eval start                              # pay eval fee
+propfund eval start                              # start eval (free)
 propfund eval trade-open --asset SOL             # open a virtual long
 # ... wait MIN_TRADE_BLOCKS (10) ...
 propfund eval trade-close                        # settle (3+ closed trades to pass)
