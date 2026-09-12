@@ -502,6 +502,7 @@ async function fetchAllCandles(symbols, tf = '15m', limit = 24) {
 // Min score for a setup to count as actionable. Below this, agent should WAIT — random
 // entries on weak signals are the #1 reason qwen3 ground out 22 trades at 0% net.
 const MIN_EDGE_SCORE = Number(process.env.EVAL_MIN_EDGE_SCORE || 0.50);
+const SIGNAL_STYLE = (process.env.AGENT_SIGNAL_STYLE || 'blend').toLowerCase();  // 'playbook' | 'momentum' | 'blend' (YouHaveOptions bake-off)
 
 // Build per-asset signals + a cross-asset ranking. Each asset has its own trend/momentum/range
 // for both 15m and 1h timeframes. The 1h is the higher-timeframe context — entries get a
@@ -629,9 +630,18 @@ function computeSignalsAcrossAssets(candleMap15m, candleMap1h, spotByAsset) {
                          : 0.4;  // active disagreement = strong skepticism
 
         const trendBonus15 = trend15 === 'UP' ? 1 : trend15 === 'DOWN' ? -1 : 0;
-        const longScore  = (m1 * (trendBonus15 > 0 ? 1.5 : trendBonus15 < 0 ? 0 : 1) + 0.5 * m6) * confluence;
+        const momScore   = (m1 * (trendBonus15 > 0 ? 1.5 : trendBonus15 < 0 ? 0 : 1) + 0.5 * m6) * confluence;
+        // Playbook (YouHaveOptions) setup bonus: each confirmed long setup adds edge, so ETH's OWN
+        // setup can clear the bar on RSI-oversold + MACD-cross + VWAP-reclaim even when raw momentum
+        // is small. STYLE weights the two: 'playbook' leans on confirmations, 'momentum' on the old
+        // score, default blends. Bounded so it can't run away.
+        const setupBonus = Math.min(1.5, 0.4 * (s._longSetupCount || 0)
+            + (s._macdCrossUp ? 0.3 : 0) + (s._orbBreakHigh ? 0.3 : 0) + (s._rsi <= 30 ? 0.3 : 0));
+        const wMom = SIGNAL_STYLE === 'playbook' ? 0.5 : SIGNAL_STYLE === 'momentum' ? 1.0 : 0.8;
+        const wSet = SIGNAL_STYLE === 'playbook' ? 1.5 : SIGNAL_STYLE === 'momentum' ? 0.0 : 1.0;
+        const longScore  = wMom * momScore + wSet * setupBonus * (confluence >= 1 ? 1 : 0.6);
         const shortScore = (-m1 * (trendBonus15 < 0 ? 1.5 : trendBonus15 > 0 ? 0 : 1) + 0.5 * -m6) * confluence;
-        return { sym, longScore, shortScore, vol, m1, trend15, trend1h, confluence };
+        return { sym, longScore, shortScore, vol, m1, trend15, trend1h, confluence, setups: s.long_setups || [], rsi: s.rsi_14, macd: s.macd, pvv: s.price_vs_vwap };
     });
     const bestLong = scored.reduce((a, b) => b.longScore > a.longScore ? b : a, { longScore: -Infinity });
     const bestShort = scored.reduce((a, b) => b.shortScore > a.shortScore ? b : a, { shortScore: -Infinity });
@@ -643,6 +653,7 @@ function computeSignalsAcrossAssets(candleMap15m, candleMap1h, spotByAsset) {
         trend_15m: b.trend15,
         trend_1h: b.trend1h,
         confluence: b.confluence === 1.5 ? 'HTF_AGREES' : b.confluence === 1.0 ? 'NEUTRAL' : 'HTF_DISAGREES',
+        rsi: b.rsi, macd: b.macd, price_vs_vwap: b.pvv, long_setups: b.setups,
     });
     return {
         per_asset: out,
@@ -690,6 +701,48 @@ function computeSignals(candles, currentPrice) {
     const momentum6h = ((last - sixHourAgo) / sixHourAgo) * 100;
     const rangePos = (currentPrice - low24) / Math.max(1e-9, high24 - low24);  // 0=at low, 1=at high
 
+    // --- YouHaveOptions playbook indicators (long-side): RSI, MACD, VWAP, ORB, volume spike ---
+    // Ported from the SPY-0DTE desk bot; adapted to 24/7 spot. Computed on a chronological
+    // (oldest->newest) view since candles arrive newest-first.
+    const chrono = candles.slice().reverse();
+    const cCloses = chrono.map(c => c.close);
+    const ema = (arr, n) => { const k = 2 / (n + 1); let e = arr[0]; for (let i = 1; i < arr.length; i++) e = arr[i] * k + e * (1 - k); return e; };
+    const emaSeries = (arr, n) => { const k = 2 / (n + 1); const out = [arr[0]]; for (let i = 1; i < arr.length; i++) out.push(arr[i] * k + out[i-1] * (1 - k)); return out; };
+    // RSI(14)
+    let rsi = 50;
+    if (cCloses.length >= 15) {
+        let g = 0, l = 0; for (let i = cCloses.length - 14; i < cCloses.length; i++) { const d = cCloses[i] - cCloses[i-1]; if (d >= 0) g += d; else l -= d; }
+        const rs = l === 0 ? 100 : g / l; rsi = l === 0 ? 100 : 100 - 100 / (1 + rs);
+    }
+    // MACD(12,26,9): histogram + whether it just crossed up (bullish) between the last two bars
+    let macdHist = 0, macdCrossUp = false, macdBull = false;
+    if (cCloses.length >= 26) {
+        const macdLine = cCloses.map((_, i) => i >= 25 ? ema(cCloses.slice(0, i+1).slice(-26), 12) - ema(cCloses.slice(0, i+1).slice(-26), 26) : 0);
+        const validMacd = macdLine.slice(25);
+        const sig = emaSeries(validMacd, 9);
+        const h = validMacd.map((m, i) => m - sig[i]);
+        macdHist = h[h.length - 1]; const prevH = h[h.length - 2] ?? 0;
+        macdBull = macdHist > 0; macdCrossUp = prevH <= 0 && macdHist > 0;
+    }
+    // VWAP over the window (typical price x volume) and price position vs it
+    let vwap = last, aboveVwap = false;
+    { let pv = 0, vv = 0; for (const c of chrono) { const tp = (c.high + c.low + c.close) / 3; pv += tp * (c.volume || 0); vv += (c.volume || 0); } if (vv > 0) vwap = pv / vv; aboveVwap = last > vwap; }
+    // ORB: opening range = high/low of the oldest 4 candles in the window; break high = bullish
+    const orbHigh = Math.max(...chrono.slice(0, 4).map(c => c.high));
+    const orbLow = Math.min(...chrono.slice(0, 4).map(c => c.low));
+    const orbBreakHigh = last > orbHigh;
+    // Volume spike: latest candle vs window average
+    const vols = chrono.map(c => c.volume || 0); const avgVol = vols.reduce((a,b)=>a+b,0) / Math.max(1, vols.length);
+    const volRatio = avgVol > 0 ? (candles[0].volume || 0) / avgVol : 1;
+    const upCandle = candles[0].close >= candles[0].open;
+    // Long-side confirmations (the transferable YouHaveOptions setups)
+    const longSetups = [];
+    if (aboveVwap) longSetups.push('vwap_reclaim');
+    if (rsi <= 35) longSetups.push('rsi_oversold');
+    if (macdCrossUp) longSetups.push('macd_cross_up'); else if (macdBull) longSetups.push('macd_bullish');
+    if (orbBreakHigh) longSetups.push('orb_break_high');
+    if (volRatio >= 1.5 && upCandle) longSetups.push('volume_spike_up');
+
     return {
         trend_short_vs_long: trend,        // SMA6 vs SMA20 over 15m candles
         sma_short_usd: sma6.toFixed(2),
@@ -701,6 +754,17 @@ function computeSignals(candles, currentPrice) {
         range_24h_high_usd: high24.toFixed(2),
         range_position_pct: `${(rangePos * 100).toFixed(0)}%`,  // 0% = at low, 100% = at high
         last4_15m_direction: lastDirs,  // e.g. "DDUU" = down,down,up,up oldest→newest
+        rsi_14: rsi.toFixed(0),
+        macd_hist: macdHist.toFixed(2),
+        macd: macdCrossUp ? 'CROSS_UP' : macdBull ? 'BULLISH' : 'BEARISH',
+        vwap_usd: vwap.toFixed(2),
+        price_vs_vwap: aboveVwap ? 'ABOVE' : 'BELOW',
+        orb_high_usd: orbHigh.toFixed(2),
+        orb_break_high: orbBreakHigh,
+        volume_ratio: volRatio.toFixed(2),
+        long_setups: longSetups,   // active YouHaveOptions-style long confirmations
+        _longSetupCount: longSetups.length,   // numeric, for scoring
+        _rsi: rsi, _aboveVwap: aboveVwap, _macdCrossUp: macdCrossUp, _orbBreakHigh: orbBreakHigh,
     };
 }
 
@@ -867,7 +931,12 @@ function buildUserPrompt(state, candles, signals, multiSignals) {
     if (state.desk?.admitted) {
         hints.push(state.desk.in_eth
             ? `DESK: IN ETH — book marked ${state.desk.book_value_usdc} USDC (${state.desk.unrealized_return} vs entry), liquidation floor ${state.desk.drawdown_floor_usdc}. Exit is AUTOMATED; WAIT unless you have a strong reason to EXIT_ETH.`
-            : `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc} (ladder ${state.desk.ladder_mult_now}x, realized ${state.desk.realized_pnl_usdc} vs hold-hurdle ${state.desk.hold_hurdle_usdc}, PF ${state.desk.profit_factor} over ${state.desk.desk_trades} trades). ENTER_ETH only on a clean LONG setup worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`);
+            : (() => {
+                // The desk trades ETH ONLY — so judge ETH's OWN setup, not the cross-asset best.
+                const e = multiSignals?.per_asset?.ETH;
+                const eth = e ? `ETH now: ${e.trend_short_vs_long} 15m / ${e.htf_1h?.trend_short_vs_long ?? '?'} 1h · RSI ${e.rsi_14} · MACD ${e.macd} · price ${e.price_vs_vwap} VWAP · mom ${e.momentum_1h} 1h · setups [${(e.long_setups||[]).join(', ') || 'none'}]` : 'ETH signals unavailable';
+                return `DESK: IN USDC — book ${state.desk.book_usdc} USDC of allocation ${state.desk.allocation_usdc} (ladder ${state.desk.ladder_mult_now}x, realized ${state.desk.realized_pnl_usdc} vs hold-hurdle ${state.desk.hold_hurdle_usdc}, PF ${state.desk.profit_factor} over ${state.desk.desk_trades} trades). You can ONLY trade ETH here — ignore other assets' setups. ${eth}. ENTER_ETH when ETH's OWN long setup is clean (multiple confirmations: VWAP reclaim, RSI turning up from oversold, MACD cross-up, ORB break, volume) and worth clearly more than the ~0.2% round-trip cost. Otherwise WAIT.`;
+            })());
     }
     // Eval entry directive: the code owns exits, so the LLM's only eval job is a clean LONG entry.
     if (state.eval.active && !state.eval.passed && !state.eval.in_virtual_trade) {
