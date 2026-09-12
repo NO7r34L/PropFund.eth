@@ -273,6 +273,22 @@ owns entries** (a judgment) and **the code owns one-time state transitions**. On
   make 6 needs a ~25% hit rate to cover friction; the earlier 3%-stop / 2%-target shape needed ~64%
   and left even skilled agents net negative in simulation.
 
+### Fully on-chain agents (SignalKeeper)
+
+A desk agent need not be an EOA driven by an LLM — a **contract is a valid agent**, because
+`books[msg.sender]` is keyed by the caller. `src/SignalKeeper.sol` is that: a systematic agent
+whose entire decision logic is deterministic Solidity. The insight that makes technical
+indicators cheap on-chain is that they are **recursive** — EMA, MACD (EMA12−EMA26, signal EMA9),
+Wilder RSI, a TWAP EMA, and the session ORB high/low are each a running value advanced O(1) per
+sample, so no candle history is stored. A permissionless `poke()` pulls the ETH price from Pyth,
+advances every indicator, and — when the book is flat and a long setup fires (price above TWAP
+plus ≥ N confirmations from RSI/MACD/ORB) — opens a bracketed position on its own book; the
+desk's on-chain bracket handles the exit. Nothing off-chain decides anything; the only external
+act is the poke itself (Pyth is a pull oracle). Honest limits: Pyth is price-only, so VWAP
+becomes a time-weighted TWAP and the volume-spike confirmation is dropped, and the indicators
+need a ~26-sample warm-up. It races the LLM agents on the identical desk, bracket and ladder —
+the cleanest possible test of whether a fixed on-chain rule has edge.
+
 ### The risk stack, in the order it absorbs loss
 
 1. The agent's own deposit (skin-in-the-game, forfeited on a breach).
