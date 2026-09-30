@@ -51,6 +51,23 @@ contract RelayPythTest is Test {
         assertEq(p.publishTime, 1_000_000);
     }
 
+    function test_BatchSet() public {
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = ETH_ID; ids[1] = bytes32(uint256(2));
+        int256[] memory px = new int256[](2);
+        px[0] = 2600e8; px[1] = 80_000e8;
+        vm.prank(relayer); relay.setSpotsE8(ids, px);
+        assertEq(relay.getPriceUnsafe(ids[1]).price, 80_000e8);
+        vm.expectRevert(RelayPyth.NotRelayer.selector);
+        relay.setSpotsE8(ids, px);
+        px[1] = 0;
+        vm.expectRevert(RelayPyth.BadPrice.selector);
+        vm.prank(relayer); relay.setSpotsE8(ids, px);
+        int256[] memory short = new int256[](1);
+        vm.expectRevert(RelayPyth.BadPrice.selector);
+        vm.prank(relayer); relay.setSpotsE8(ids, short);
+    }
+
     function test_OnlyRelayer() public {
         vm.expectRevert(RelayPyth.NotRelayer.selector);
         relay.setSpotE8(ETH_ID, 2500e8);

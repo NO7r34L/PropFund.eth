@@ -18,6 +18,14 @@ contract MockPyth is IPyth {
         _prices[id] = Price({ price: int64(priceE8), conf: 0, expo: -8, publishTime: block.timestamp });
     }
 
+    /// @notice Batch setSpotE8 — same shape as RelayPyth.setSpotsE8, so the devnet heartbeat can
+    ///         drive either contract.
+    function setSpotsE8(bytes32[] calldata ids, int256[] calldata pricesE8) external {
+        for (uint256 i = 0; i < ids.length; i++) {
+            _prices[ids[i]] = Price({ price: int64(pricesE8[i]), conf: 0, expo: -8, publishTime: block.timestamp });
+        }
+    }
+
     /// @notice Like setSpotE8 but with a custom confidence interval (also expo-8).
     /// Used by audit tests to verify the conf-rejection guard (M-1).
     function setSpotE8WithConf(bytes32 id, int256 priceE8, uint64 confE8) external {

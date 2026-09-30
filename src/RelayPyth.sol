@@ -39,6 +39,18 @@ contract RelayPyth is IPyth {
         emit PriceRelayed(id, int64(priceE8), block.timestamp);
     }
 
+    /// @notice Batch form of setSpotE8 — the heartbeat writes every moved feed in one tx.
+    function setSpotsE8(bytes32[] calldata ids, int256[] calldata pricesE8) external {
+        if (msg.sender != relayer) revert NotRelayer();
+        if (ids.length != pricesE8.length) revert BadPrice();
+        for (uint256 i = 0; i < ids.length; i++) {
+            int256 px = pricesE8[i];
+            if (px <= 0 || px > type(int64).max) revert BadPrice();
+            _prices[ids[i]] = Price({ price: int64(px), conf: 0, expo: -8, publishTime: block.timestamp });
+            emit PriceRelayed(ids[i], int64(px), block.timestamp);
+        }
+    }
+
     /// @notice Hand the relayer role to a new key (e.g. after a rotation). Only the current relayer.
     function setRelayer(address next) external {
         if (msg.sender != relayer) revert NotRelayer();
