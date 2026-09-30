@@ -24,7 +24,9 @@ import { isJson, flag } from '../args.js';
 import { runWithWatchdog } from '../watchdog.js';
 import { hermesHeaders } from '../networks.js';
 
-const MIN_BALANCE_WEI = 1_000_000_000_000_000n;  // 0.001 ETH — refuse to act below this
+// 0.001 ETH default — refuse to act below this. Sized for Eth Sepolia gas; on Base (~0.006 gwei)
+// a keeper tx costs ~0.000003 ETH, so set MIN_ETH_WEI far lower there.
+const MIN_BALANCE_WEI = BigInt(process.env.MIN_ETH_WEI || 1_000_000_000_000_000n);
 
 // Pull a fresh Pyth update from Hermes and push it on-chain so liquidate / executeExit see
 // live prices instead of stale cached state. No-op on networks without Pyth wired (sepolia).
