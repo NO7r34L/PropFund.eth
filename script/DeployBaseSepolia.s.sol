@@ -5,6 +5,11 @@ pragma solidity 0.8.26;
 // Run:
 //   PRIVATE_KEY=0x... forge script script/DeployBaseSepolia.s.sol:DeployBaseSepoliaScript \
 //     --rpc-url https://sepolia.base.org --broadcast
+//
+// Keyless oracle (Pyth's API is paid-only since 2026-09 and nobody pushes Pyth on Base Sepolia):
+//   RELAY_ORACLE=true RELAY_SEED_E8=<8 comma-separated expo-8 spots, ETH,BTC,SOL,AVAX,LINK,AAVE,DOGE,ARB>
+//   [RELAYER=<heartbeat key address>] deploys a RelayPyth, seeds it (PropFund's constructor needs a
+//   live price per feed), hands the relayer role to RELAYER, and wires PropFund to it. Testnet only.
 
 import {Script, console} from "forge-std/Script.sol";
 import {PropFund} from "../src/PropFund.sol";
@@ -13,6 +18,7 @@ import {EvalCert} from "../src/EvalCert.sol";
 import {EvalCertRenderer} from "../src/EvalCertRenderer.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";
 import {IPyth} from "../src/interfaces/IPyth.sol";
+import {RelayPyth} from "../src/RelayPyth.sol";
 
 contract MockUSDCBaseSepolia {
     string public constant name = "Mock USDC";
@@ -77,11 +83,22 @@ contract DeployBaseSepoliaScript is Script {
 
         vm.startBroadcast(pk);
 
+        address pyth = PYTH;
+        if (vm.envOr("RELAY_ORACLE", false)) {
+            uint256[] memory seed = vm.envUint("RELAY_SEED_E8", ",");
+            require(seed.length == ids.length, "RELAY_SEED_E8 needs one price per feed");
+            RelayPyth relay = new RelayPyth(deployer);
+            for (uint256 i = 0; i < ids.length; i++) relay.setSpotE8(ids[i], int256(seed[i]));
+            address relayer = vm.envOr("RELAYER", deployer);
+            if (relayer != deployer) relay.setRelayer(relayer);
+            pyth = address(relay);
+        }
+
         MockUSDCBaseSepolia usdc = new MockUSDCBaseSepolia();
 
         PropFund fund = new PropFund(PropFund.Config({
             usdc: IERC20(address(usdc)),
-            pyth: IPyth(PYTH),
+            pyth: IPyth(pyth),
             treasury: vm.envOr("TREASURY", deployer),
             guardian: vm.envOr("GUARDIAN", deployer),
             evalFee: vm.envOr("EVAL_FEE", uint256(1)),   // 1 wei USDC = effectively free (constructor forbids 0); override via EVAL_FEE
@@ -116,13 +133,13 @@ contract DeployBaseSepoliaScript is Script {
         vm.stopBroadcast();
 
         console.log("");
-        console.log("=== DEPLOYED TO BASE SEPOLIA (real Pyth feeds) ===");
+        console.log(pyth == PYTH ? "=== DEPLOYED TO BASE SEPOLIA (real Pyth feeds) ===" : "=== DEPLOYED TO BASE SEPOLIA (RelayPyth oracle) ===");
         console.log("PropFund:", address(fund));
         console.log("MockUSDC:", address(usdc));
         console.log("EvalCert:", address(cert));
         console.log("Renderer:", address(renderer));
         console.log("Lens:    ", address(lens));
-        console.log("Pyth:    ", PYTH);
+        console.log("Pyth:    ", pyth);
         console.log("Pool:    ", fund.poolBalance());
         console.log("Assets:  ETH, BTC, SOL, AVAX, LINK, AAVE, DOGE, ARB (Pyth)");
         console.log("");

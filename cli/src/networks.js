@@ -151,6 +151,7 @@ export function resolveNetwork(name) {
         return {
             ...NETWORKS.basesepolia,
             ...(pythUpdatesOff() ? { hermesUrl: null } : {}),
+            ...(process.env.PROPFUND_PYTH ? { pythAddr: process.env.PROPFUND_PYTH } : {}),
             key: 'baselocal',
             chainName: 'Base Sepolia (anvil fork)',
             rpcUrl: process.env.PROPFUND_RPC,
@@ -170,5 +171,7 @@ export function resolveNetwork(name) {
     // PYTH_HERMES_URL points at the upgraded endpoint (https://pyth.dourolabs.app/hermes) for
     // the "early upgrade" path. The default keeps hermes.pyth.network, which the DAO upgraded
     // in place — same routes and response shapes, but it still needs the API key.
-    return { ...net, key, hermesUrl: pythUpdatesOff() ? null : (process.env.PYTH_HERMES_URL || net.hermesUrl) };
+    // PROPFUND_PYTH points the CLI at a non-canonical oracle (a testnet RelayPyth deploy).
+    return { ...net, key, hermesUrl: pythUpdatesOff() ? null : (process.env.PYTH_HERMES_URL || net.hermesUrl),
+        pythAddr: process.env.PROPFUND_PYTH || net.pythAddr };
 }
