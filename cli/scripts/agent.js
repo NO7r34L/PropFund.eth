@@ -286,7 +286,16 @@ function log(level, event, data) {
 // trade then reads 0.00% and time-stops flat). Settlement still happens on-chain: the router
 // applies the same Hermes price at close, so the decision and the settlement stay consistent.
 async function fetchLiveSpot(network, priceId) {
-    if (!network?.hermesUrl || !priceId) return null;
+    if (!priceId) return null;
+    if (!network?.hermesUrl) {
+        // Keyless mode (PYTH_UPDATES=off): Coinbase public spot for the same asset.
+        const name = network?.assetNames?.[network?.pythPriceIds?.indexOf(priceId)];
+        if (!name) return null;
+        const res = await fetch(`https://api.exchange.coinbase.com/products/${name.toUpperCase()}-USD/ticker`, { headers: { 'User-Agent': 'propfund-agent/0.1' } });
+        if (!res.ok) return null;
+        const px = Number((await res.json())?.price);
+        return px > 0 ? px : null;
+    }
     const id = priceId.startsWith('0x') ? priceId : '0x' + priceId;
     const res = await fetch(`${network.hermesUrl}/v2/updates/price/latest?ids[]=${id}`, { headers: hermesHeaders({ 'User-Agent': 'propfund-agent/0.1' }) });
     if (!res.ok) return null;
@@ -1120,7 +1129,7 @@ async function executeAction(action, propfund, usdc, wallet, state, network, rou
     // price update + trade land in a SINGLE tx. Left null -> the price is fresh (direct trade) or
     // there's no router (legacy separate-push path below).
     let routedUpdate = null;
-    if (network.pythAddr && PRICE_SENSITIVE.has(action.action)) {
+    if (network.pythAddr && network.hermesUrl && PRICE_SENSITIVE.has(action.action)) {
         // ALWAYS refresh the price for a price-sensitive trade. PnL is virtualBalance *= closeSpot/entry
         // (eval) / spot-vs-entry (funded), so entry AND exit must be real-time prices. A feed that is
         // merely "fresh" per the contract's staleAfter window (up to 24h on testnet, where nobody pushes

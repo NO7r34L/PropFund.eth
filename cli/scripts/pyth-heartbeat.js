@@ -10,9 +10,14 @@
 //
 // Not for public networks — there, real publishers keep feeds fresh and this is redundant.
 //
+// HEARTBEAT_SOURCE=coinbase (keyless — Pyth API keys are paid-only since 2026-09-22): the fork's
+// Pyth address must hold MockPyth code (`anvil_setCode`, see DEVNET.md); every interval this
+// writes Coinbase public spot straight into it via setSpotE8. Pair with PYTH_UPDATES=off on the
+// agent/keeper. Devnet only — it trusts one relay key, which a public network must never do.
+//
 // Env: PROPFUND_NETWORK / PROPFUND_RPC / PROPFUND_CONTRACT, PROPFUND_KEY (gas payer),
 //      PYTH_API_KEY (Hermes auth), AGENT_ASSETS (feeds to keep fresh — must be entitled),
-//      HEARTBEAT_SEC (default 20).
+//      HEARTBEAT_SEC (default 20), HEARTBEAT_SOURCE (hermes | coinbase, default hermes).
 
 import { JsonRpcProvider, Wallet, NonceManager, Contract, getAddress } from 'ethers';
 import { resolveNetwork, hermesHeaders } from '../src/networks.js';
@@ -27,6 +32,9 @@ const signer = new NonceManager(new Wallet(
     (process.env.PROPFUND_KEY.startsWith('0x') ? '' : '0x') + process.env.PROPFUND_KEY, provider));
 const propfund = new Contract(getAddress(net.contractAddr),
     ['function pushPyth(bytes[] updateData) payable'], signer);
+const SOURCE = (process.env.HEARTBEAT_SOURCE || 'hermes').toLowerCase();
+const mockPyth = new Contract(getAddress(net.pythAddr),
+    ['function setSpotE8(bytes32 id, int256 priceE8)'], signer);
 
 // Feed ids for the assets we keep fresh — the allowlist (entitled feeds) or all configured.
 const ids = net.assetNames
@@ -47,8 +55,22 @@ async function fetchVAAs() {
     return data.map(d => '0x' + d);
 }
 
+// Keyless relay: Coinbase public spot -> MockPyth.setSpotE8, one tx per feed.
+async function pushCoinbase() {
+    for (const a of ids) {
+        const res = await fetch(`https://api.exchange.coinbase.com/products/${a.name}-USD/ticker`,
+            { headers: { 'User-Agent': 'propfund-heartbeat/0.1' } });
+        if (!res.ok) throw new Error(`Coinbase ${a.name} ${res.status}`);
+        const px = Number((await res.json())?.price);
+        if (!(px > 0)) throw new Error(`Coinbase ${a.name} returned no price`);
+        const tx = await mockPyth.setSpotE8(a.id.startsWith('0x') ? a.id : '0x' + a.id,
+            BigInt(Math.round(px * 1e8)), { gasLimit: 200_000n });
+        await tx.wait();
+    }
+}
+
 log('INFO', 'heartbeat-start', { network: net.key, rpc: rpcUrl, contract: net.contractAddr,
-    feeds: ids.map(a => a.name), intervalSec: INTERVAL / 1000 });
+    feeds: ids.map(a => a.name), source: SOURCE, intervalSec: INTERVAL / 1000 });
 
 // Keep the fork's clock at wall-time. A fork's block.timestamp drifts behind real time (it
 // advances by --block-time per block, and pauses whenever anvil is stopped), while Hermes
@@ -68,6 +90,12 @@ let consecutiveErrors = 0;
 async function tick() {
     try {
         await syncClock();
+        if (SOURCE === 'coinbase') {
+            await pushCoinbase();
+            consecutiveErrors = 0;
+            log('INFO', 'heartbeat-pushed', { feeds: ids.length, source: 'coinbase' });
+            return;
+        }
         const updateData = await fetchVAAs();
         const tx = await propfund.pushPyth(updateData, { value: 300000n, gasLimit: 1_500_000n });
         await tx.wait();

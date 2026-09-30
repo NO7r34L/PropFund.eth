@@ -98,6 +98,12 @@ export const NETWORKS = {
     },
 };
 
+// PYTH_UPDATES=off: never call Hermes. Since 2026-09-22 Pyth API keys are paid-only (Starter
+// $500/mo; the free tier is view-only), so a keyless deployment reads whatever is already on-chain:
+// Pyth's sponsored pushes on Base mainnet, or the devnet's relay heartbeat. Trades then go direct
+// (no bundled update) and the contract's staleAfter window is the only freshness guard.
+export const pythUpdatesOff = () => (process.env.PYTH_UPDATES || '').toLowerCase() === 'off';
+
 // Hermes has required authentication since the Pyth Core upgrade (2026-08-26 16:00 UTC).
 // Set PYTH_API_KEY. Unauthenticated calls return 401 on every route that serves signed
 // price updates. Returns `extra` unchanged when no key is set so local/mock setups still work.
@@ -144,6 +150,7 @@ export function resolveNetwork(name) {
         }
         return {
             ...NETWORKS.basesepolia,
+            ...(pythUpdatesOff() ? { hermesUrl: null } : {}),
             key: 'baselocal',
             chainName: 'Base Sepolia (anvil fork)',
             rpcUrl: process.env.PROPFUND_RPC,
@@ -163,5 +170,5 @@ export function resolveNetwork(name) {
     // PYTH_HERMES_URL points at the upgraded endpoint (https://pyth.dourolabs.app/hermes) for
     // the "early upgrade" path. The default keeps hermes.pyth.network, which the DAO upgraded
     // in place — same routes and response shapes, but it still needs the API key.
-    return { ...net, key, hermesUrl: process.env.PYTH_HERMES_URL || net.hermesUrl };
+    return { ...net, key, hermesUrl: pythUpdatesOff() ? null : (process.env.PYTH_HERMES_URL || net.hermesUrl) };
 }
