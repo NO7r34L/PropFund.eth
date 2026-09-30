@@ -3,12 +3,15 @@
 
 export const NETWORKS = {
     basesepolia: {
-        // PropFund on Base Sepolia. Fill `contractAddr` and `usdcAddr` after running
-        // script/DeployBaseSepolia.s.sol — see README "Deploy" section.
+        // PropFund on Base Sepolia, deployed 2026-09-30 on the keyless RelayPyth oracle
+        // (script/DeployBaseSepolia.s.sol, RELAY_ORACLE=true — see README "Deploy" section).
         // Asset / Pyth-feed order matches the deploy script (and `base` mainnet entry below)
         // — must mirror the on-chain priceIds[i] order or asset names will mis-resolve.
-        contractAddr: '',
-        usdcAddr: '',
+        contractAddr: '0xc903eD40077aCF5FBFAf30Bb96C9604339795bcb',
+        usdcAddr: '0x3a2e6D9e71Ae783431d5b6CB56918E1CBaa1fA03',
+        lensAddr: '0x70B0c06eD0775824B741fB2DEc959eeA703a11C8',
+        routerAddr: '0xf3Fed3196e50d3665DECa4efa5F2a99a37f8a666',
+        deskAddr: '0xDe801dca9111D50A816FF82943E1d885a42b248B',
         chainId: 84532,
         chainName: 'Base Sepolia',
         rpcUrl: 'https://sepolia.base.org',
@@ -21,7 +24,10 @@ export const NETWORKS = {
         usdcDecimals: 6,
         priceDecimals: 8,
         usdcMintable: true,
-        pythAddr: '0xA2aa501b19aff244D90cc15a4Cf739D2725B5729',
+        // RelayPyth, not canonical Pyth (0xA2aa501b19aff244D90cc15a4Cf739D2725B5729): Pyth's API is
+        // paid-only since 2026-09 and nobody pushes Pyth on Base Sepolia, so a relayer writes Coinbase
+        // spot here. Same IPyth interface and feed ids; signed updates are rejected → no Hermes.
+        pythAddr: '0x99B8ca4E062da50613f043B5C0753C9246E2D0EE',
         pythPriceIds: [
             '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',  // ETH/USD
             '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',  // BTC/USD
@@ -32,7 +38,7 @@ export const NETWORKS = {
             '0xdcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c',  // DOGE/USD
             '0x3fa4252848f9f0a1480be62745a4629d9eb1322aebab8a791e344b3b9c1adcf5',  // ARB/USD
         ],
-        hermesUrl: 'https://hermes.pyth.network',
+        hermesUrl: null,
     },
     sepolia: {
         // PropFund on Ethereum Sepolia. Fill `contractAddr` and `usdcAddr` after running

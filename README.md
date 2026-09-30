@@ -2,7 +2,7 @@
 
 # PropFund
 
-> **Status:** Deployed and [source-verified](https://sourcify.dev/#/lookup/0x728d1739E494b7957B7b6A3Ba375006f58D296fc) on Ethereum Sepolia — **[contract on Etherscan](https://sepolia.etherscan.io/address/0x728d1739E494b7957B7b6A3Ba375006f58D296fc)** (separate treasury/guardian keys) — and **migrating to Base Sepolia** ([PR #30](https://github.com/NO7r34L/PropFund.eth/pull/30)): the contract's block-based timing constants were sized for Base's 2s blocks, and an oracle update there costs ~600× less gas. The Sepolia bot is paused for the move. Testnet only, no real funds, while we harden it toward an audit.
+> **Status:** Live on **Base Sepolia** — [PropFund on Basescan](https://sepolia.basescan.org/address/0xc903eD40077aCF5FBFAf30Bb96C9604339795bcb) · [AgentDesk](https://sepolia.basescan.org/address/0xDe801dca9111D50A816FF82943E1d885a42b248B) — with the reference agent and keeper running against it. Prices come from **RelayPyth**, a Pyth-compatible relay fed with Coinbase spot: Pyth's API went paid-only in 2026-09 and nobody pushes Pyth on Base Sepolia. That relay is a testnet-only trust assumption; mainnet reads the canonical Pyth contract. The original Ethereum Sepolia deploy is retired. Testnet only, no real funds, while we harden it toward an audit.
 
 **A decentralized prop firm built for AI agents** — every rule enforced on-chain, not by a company. Any autonomous agent (or human) can clone it, pass a transparent evaluation, get funded with the pool's capital, and trade — no application, no backend, no admin, no human in the loop.
 
@@ -189,7 +189,7 @@ cli/mcp/server.js                   MCP server — every CLI command as a struct
 cli/Containerfile                   container image for the autonomous trader
 test/                               unit, lifecycle, queue, invariants, delegation, live-Pyth fork
 script/DeployLocal.s.sol            Anvil deploy with mocks
-script/DeployBaseSepolia.s.sol      Base Sepolia deploy with live Pyth + auto-wired renderer
+script/DeployBaseSepolia.s.sol      Base Sepolia deploy (Pyth, or RelayPyth with RELAY_ORACLE=true) + renderer
 script/DeployBase.s.sol             Base mainnet deploy (production)
 script/DeployDesk.s.sol             AgentDesk deploy against an existing PropFund lens (mock venue/WETH on forks)
 ```
@@ -269,7 +269,7 @@ anvil &
 forge script script/DeployLocal.s.sol:DeployLocalScript \
   --rpc-url http://localhost:8545 --broadcast
 
-# Base Sepolia (live Pyth)
+# Base Sepolia (Pyth; add RELAY_ORACLE=true RELAY_SEED_E8=... RELAYER=... for the keyless relay)
 PRIVATE_KEY=0x... forge script script/DeployBaseSepolia.s.sol:DeployBaseSepoliaScript \
   --rpc-url https://sepolia.base.org --broadcast
 
