@@ -6,17 +6,20 @@
 // setup fires. Something still has to send the tx, because a pull oracle and the EVM never wake
 // themselves up. This loop does that and nothing else — every decision stays on-chain.
 //
-// Each tick simulates poke() first (staticCall), so a stale oracle or any revert costs no gas.
+// Each tick simulates poke() first (staticCall), so a stale oracle or any revert costs no gas,
+// then sends with an estimated gas limit — a fixed high limit makes the node demand
+// limit × maxFee up front, which strands a nearly-empty wallet long before it is actually empty.
 //
 // Env: PROPFUND_NETWORK / PROPFUND_RPC, PROPFUND_KEY (gas payer — use its own key, not a bot's,
-//      so nonces never collide), SIGNAL_KEEPER (contract address), POKE_SEC (default 300).
+//      so nonces never collide), SIGNAL_KEEPER (contract address), POKE_SEC (default 900 — one
+//      poke per SAMPLE_INTERVAL; more often only re-checks the entry between samples).
 
 import { JsonRpcProvider, Wallet, NonceManager, Contract, getAddress } from 'ethers';
 import { resolveNetwork } from '../src/networks.js';
 
 const net = resolveNetwork();
 const rpcUrl = process.env.PROPFUND_RPC || net.rpcUrl;
-const INTERVAL = Number(process.env.POKE_SEC || 300) * 1000;
+const INTERVAL = Number(process.env.POKE_SEC || 900) * 1000;
 
 const provider = new JsonRpcProvider(rpcUrl, net.chainId, { staticNetwork: true });
 const signer = new NonceManager(new Wallet(
@@ -35,15 +38,16 @@ log('INFO', 'poker-start', { network: net.key, rpc: rpcUrl, signalKeeper: keeper
 
 let consecutiveErrors = 0;
 async function tick() {
+    let gasLimit;
     try {
-        await keeper.poke.staticCall([], { gasLimit: 900_000n });
+        gasLimit = (await keeper.poke.estimateGas([])) * 13n / 10n;
     } catch (e) {
         consecutiveErrors++;
         log('WARN', 'poke-skipped', { reason: String(e.shortMessage || e.message || e).slice(0, 160), consecutiveErrors });
         return;
     }
     try {
-        const tx = await keeper.poke([], { gasLimit: 900_000n });
+        const tx = await keeper.poke([], { gasLimit });
         const receipt = await tx.wait();
         const ev = receipt.logs.map(l => { try { return keeper.interface.parseLog(l); } catch { return null; } })
             .find(p => p?.name === 'Poked');
